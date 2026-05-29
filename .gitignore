@@ -16,7 +16,6 @@ Matches_*.csv
 oracle_data.db
 vip_members.db
 # oracle_brain.pkl  <-- tracked via LFS on HF
-# Matches.csv  <-- tracked via LFS on HF
 oracle_brain_candidate.pkl
 oracle_brain_v2.pkl
 oracle_brain_v2_threshold.txt
