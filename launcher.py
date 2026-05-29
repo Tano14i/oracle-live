@@ -25,8 +25,6 @@ BOT_PROCESS: subprocess.Popen | None = None
 BOT_LOCK = threading.Lock()
 
 PERSISTENT_FILES = [
-    "Matches.csv",
-    "oracle_brain.pkl",
     "oracle_brain_candidate.pkl",
     "oracle_data.db",
     "vip_members.db",
@@ -128,26 +126,31 @@ def resolve_lfs_files():
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
-        print("huggingface_hub not installed, skipping LFS resolve")
+        print("[LFS] huggingface_hub not installed, skipping")
         return
     for fname in LFS_FILES:
         local_path = os.path.join(BASE_DIR, fname)
         if not os.path.exists(local_path):
+            print(f"[LFS] {fname} not found, skipping")
             continue
+        size = os.path.getsize(local_path)
         with open(local_path, "rb") as f:
             header = f.read(50)
-        if header.startswith(b"version https://git-lfs.github.com"):
-            print(f"Downloading LFS file: {fname}")
+        is_pointer = header.startswith(b"version https://git-lfs.github.com")
+        print(f"[LFS] {fname}: size={size}, is_pointer={is_pointer}")
+        if is_pointer:
+            print(f"[LFS] Downloading real file: {fname}")
             try:
                 downloaded = hf_hub_download(
                     repo_id=HF_SPACE_REPO,
                     filename=fname,
                     repo_type="space",
+                    force_download=True,
                 )
                 shutil.copy2(downloaded, local_path)
-                print(f"  OK: {fname}")
+                print(f"[LFS] OK: {fname} ({os.path.getsize(local_path)} bytes)")
             except Exception as e:
-                print(f"  ERROR downloading {fname}: {e}")
+                print(f"[LFS] ERROR downloading {fname}: {e}")
 
 
 def main():
