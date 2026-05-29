@@ -1,0 +1,200 @@
+{
+  "fixtures": [
+    {
+      "fixture_id": "romania-cup-001",
+      "sport": "football",
+      "country": "Romania",
+      "league": "Romania Cup",
+      "home_team": "Corvinul Hunedoara",
+      "away_team": "Metaloglobus",
+      "kickoff_utc": "2026-03-29T16:30:00Z",
+      "public_news_hits": 0,
+      "tags": ["cup", "low-liquidity"],
+      "notes": ["late move before kickoff"],
+      "snapshots": [
+        {
+          "captured_at_utc": "2026-03-29T08:00:00Z",
+          "home_odds": 2.42,
+          "draw_odds": 3.02,
+          "away_odds": 2.95,
+          "over25_odds": 2.08,
+          "under25_odds": 1.73,
+          "bookmaker_count": 5
+        },
+        {
+          "captured_at_utc": "2026-03-29T12:45:00Z",
+          "home_odds": 2.14,
+          "draw_odds": 3.01,
+          "away_odds": 3.18,
+          "over25_odds": 2.07,
+          "under25_odds": 1.74,
+          "bookmaker_count": 5
+        },
+        {
+          "captured_at_utc": "2026-03-29T15:20:00Z",
+          "home_odds": 1.98,
+          "draw_odds": 3.06,
+          "away_odds": 3.42,
+          "over25_odds": 2.06,
+          "under25_odds": 1.75,
+          "bookmaker_count": 4
+        }
+      ]
+    },
+    {
+      "fixture_id": "italy-serie-a-002",
+      "sport": "football",
+      "country": "Italy",
+      "league": "Serie A",
+      "home_team": "Torino",
+      "away_team": "Genoa",
+      "kickoff_utc": "2026-03-29T19:45:00Z",
+      "public_news_hits": 2,
+      "tags": ["top-league"],
+      "notes": ["injury rumor already public"],
+      "snapshots": [
+        {
+          "captured_at_utc": "2026-03-29T09:00:00Z",
+          "home_odds": 2.21,
+          "draw_odds": 3.12,
+          "away_odds": 3.62,
+          "over25_odds": 2.24,
+          "under25_odds": 1.66,
+          "bookmaker_count": 18
+        },
+        {
+          "captured_at_utc": "2026-03-29T14:30:00Z",
+          "home_odds": 2.05,
+          "draw_odds": 3.18,
+          "away_odds": 3.88,
+          "over25_odds": 2.16,
+          "under25_odds": 1.71,
+          "bookmaker_count": 21
+        },
+        {
+          "captured_at_utc": "2026-03-29T18:15:00Z",
+          "home_odds": 1.97,
+          "draw_odds": 3.22,
+          "away_odds": 4.11,
+          "over25_odds": 2.12,
+          "under25_odds": 1.74,
+          "bookmaker_count": 22
+        }
+      ]
+    },
+    {
+      "fixture_id": "serbia-u19-003",
+      "sport": "football",
+      "country": "Serbia",
+      "league": "U19 League",
+      "home_team": "Partizan U19",
+      "away_team": "Vojvodina U19",
+      "kickoff_utc": "2026-03-29T14:00:00Z",
+      "public_news_hits": 0,
+      "tags": ["u19", "youth"],
+      "notes": ["youth market"],
+      "snapshots": [
+        {
+          "captured_at_utc": "2026-03-29T07:00:00Z",
+          "home_odds": 2.75,
+          "draw_odds": 3.55,
+          "away_odds": 2.18,
+          "over25_odds": 1.84,
+          "under25_odds": 1.94,
+          "bookmaker_count": 4
+        },
+        {
+          "captured_at_utc": "2026-03-29T10:15:00Z",
+          "home_odds": 2.56,
+          "draw_odds": 3.58,
+          "away_odds": 2.26,
+          "over25_odds": 1.85,
+          "under25_odds": 1.93,
+          "bookmaker_count": 4
+        },
+        {
+          "captured_at_utc": "2026-03-29T12:55:00Z",
+          "home_odds": 2.31,
+          "draw_odds": 3.60,
+          "away_odds": 2.46,
+          "over25_odds": 1.87,
+          "under25_odds": 1.91,
+          "bookmaker_count": 3
+        }
+      ]
+    },
+    {
+      "fixture_id": "itf-w60-004",
+      "sport": "tennis",
+      "country": "Turkey",
+      "league": "ITF W60 Antalya",
+      "home_team": "Player A",
+      "away_team": "Player B",
+      "kickoff_utc": "2026-03-29T11:30:00Z",
+      "public_news_hits": 0,
+      "tags": ["itf", "qualifying"],
+      "notes": ["tennis niche"],
+      "snapshots": [
+        {
+          "captured_at_utc": "2026-03-29T05:30:00Z",
+          "home_odds": 2.62,
+          "away_odds": 1.49,
+          "bookmaker_count": 4
+        },
+        {
+          "captured_at_utc": "2026-03-29T08:40:00Z",
+          "home_odds": 2.18,
+          "away_odds": 1.62,
+          "bookmaker_count": 3
+        },
+        {
+          "captured_at_utc": "2026-03-29T10:50:00Z",
+          "home_odds": 1.96,
+          "away_odds": 1.79,
+          "bookmaker_count": 3
+        }
+      ]
+    },
+    {
+      "fixture_id": "england-champ-005",
+      "sport": "football",
+      "country": "England",
+      "league": "Championship",
+      "home_team": "Bristol City",
+      "away_team": "Norwich",
+      "kickoff_utc": "2026-03-29T15:00:00Z",
+      "public_news_hits": 1,
+      "tags": ["high-liquidity"],
+      "notes": ["market already crowded"],
+      "snapshots": [
+        {
+          "captured_at_utc": "2026-03-29T07:40:00Z",
+          "home_odds": 2.74,
+          "draw_odds": 3.16,
+          "away_odds": 2.60,
+          "over25_odds": 2.01,
+          "under25_odds": 1.78,
+          "bookmaker_count": 16
+        },
+        {
+          "captured_at_utc": "2026-03-29T11:20:00Z",
+          "home_odds": 2.63,
+          "draw_odds": 3.19,
+          "away_odds": 2.68,
+          "over25_odds": 1.98,
+          "under25_odds": 1.80,
+          "bookmaker_count": 17
+        },
+        {
+          "captured_at_utc": "2026-03-29T14:10:00Z",
+          "home_odds": 2.51,
+          "draw_odds": 3.23,
+          "away_odds": 2.79,
+          "over25_odds": 1.96,
+          "under25_odds": 1.82,
+          "bookmaker_count": 17
+        }
+      ]
+    }
+  ]
+}

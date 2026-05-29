@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+joblib
+python-telebot
+requests
+plotly
+scikit-learn
+kagglehub
+pyarrow
+aiofiles

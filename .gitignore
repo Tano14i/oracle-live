@@ -1,0 +1,50 @@
+# Secrets
+.env
+*.env
+
+# Virtual env
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Large data files (stored in HF persistent storage, not in git)
+Matches.csv
+Matches_*.csv
+oracle_data.db
+vip_members.db
+oracle_brain.pkl
+oracle_brain_candidate.pkl
+oracle_brain_v2.pkl
+oracle_brain_v2_threshold.txt
+live_training_data.csv
+web_stats.json
+Performance_Log.csv
+Performance_Log_CHECK.csv
+EloRatings.csv
+cleaned_training_data.csv
+missing_teams_queue.json
+oracle_live.lock
+oracle_live.log
+oracle_sniper.log
+oracle_sniper_state.json
+oracle_perfection_gatekeeper.json
+oracle_perfection_report.json
+oracle_perfection_package.joblib
+titan_pressure_model.pkl
+titan_raw_snapshots_export.csv
+
+# Misc
+debug.png
+downloaded_files/
+archive/
+football_results.csv
+oracle_prematch/prematch_watchlist.db
+Dataset/
+england.csv
+results.csv
+goalscorers.csv
+shootouts.csv
+
