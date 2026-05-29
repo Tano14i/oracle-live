@@ -2114,7 +2114,7 @@ def format_signal_legend() -> str:
     )
 def format_free_teaser_message(tier: str, country: str, match_up: str, minute_value: int, score: str, market: str) -> str:
     return (
-        f"<b>VIP TEASER {TIER_EMOJI.get(tier, '\U0001F916')} {escape_html(tier)}</b>\n"
+        f"<b>VIP TEASER {TIER_EMOJI.get(tier, chr(0x1F916))} {escape_html(tier)}</b>\n"
         f"{SEPARATOR}\n"
         f"<b>MARKET:</b> {escape_html(market)}\n"
         f"<b>COUNTRY:</b> {escape_html(country)}\n"
