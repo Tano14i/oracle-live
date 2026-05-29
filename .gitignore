@@ -11,7 +11,7 @@ __pycache__/
 *.pyo
 
 # Large data files (stored in HF persistent storage, not in git)
-Matches.csv
+# Matches.csv  <-- tracked via LFS on HF
 Matches_*.csv
 oracle_data.db
 vip_members.db
