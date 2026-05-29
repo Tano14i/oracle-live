@@ -382,9 +382,40 @@ div[data-testid="stDataFrame"], div[data-testid="stTable"] {border-radius: 18px;
 </style>
 """, unsafe_allow_html=True)
 
+# ── Control Room (always visible) ────────────────────────────────────────────
+st.subheader("Bot Control Room")
+_running = _bot_is_running()
+_status_color = "#78e08f" if _running else "#ff6b6b"
+_status_text = "RUNNING" if _running else "STOPPED"
+st.markdown(
+    f'<div style="display:inline-block;padding:6px 18px;border-radius:999px;'
+    f'background:{"#11281b" if _running else "#2c1212"};'
+    f'border:1px solid {_status_color};color:{_status_color};font-weight:700;'
+    f'letter-spacing:0.08em;font-size:15px;">Bot: {_status_text}</div>',
+    unsafe_allow_html=True,
+)
+st.write("")
+_col1, _col2, _col3 = st.columns([1, 1, 2])
+with _col1:
+    if st.button("Start Bot", type="primary", disabled=_running):
+        _start_bot()
+        st.rerun()
+with _col2:
+    if st.button("Stop Bot", type="secondary", disabled=not _running):
+        _stop_bot()
+        st.rerun()
+with _col3:
+    if st.button("Refresh status"):
+        st.rerun()
+
+with st.expander("Live Log (last 150 lines)", expanded=False):
+    st.code(_read_log_tail(150), language="text")
+
+st.divider()
+
 data = load_dashboard_data()
 if not data:
-    st.info("Bot non ancora avviato. Avvia prima il radar e poi ricarica la dashboard.")
+    st.info("Bot non ancora avviato o nessun segnale ancora generato.")
     st.stop()
 
 raw_df = load_training_data()
@@ -500,34 +531,3 @@ else:
     st.info("Nessun feed segnali disponibile con i filtri scelti.")
 
 st.caption(f"Snapshot live | {SEPARATOR} | Current bot mode {FILTER_LABELS.get(filter_mode, filter_mode)} | Current market {MARKET_LABELS.get(market_mode, market_mode)}")
-
-# ── Control Room tab ─────────────────────────────────────────────────────────
-st.divider()
-st.subheader("Bot Control Room")
-running = _bot_is_running()
-status_color = "#78e08f" if running else "#ff6b6b"
-status_text = "RUNNING" if running else "STOPPED"
-st.markdown(
-    f'<div style="display:inline-block;padding:6px 18px;border-radius:999px;background:{"#11281b" if running else "#2c1212"};'
-    f'border:1px solid {status_color};color:{status_color};font-weight:700;letter-spacing:0.08em;font-size:15px;">'
-    f'Bot: {status_text}</div>',
-    unsafe_allow_html=True,
-)
-st.write("")
-col_start, col_stop, col_refresh = st.columns([1, 1, 2])
-with col_start:
-    if st.button("Start Bot", type="primary", disabled=running):
-        _start_bot()
-        st.rerun()
-with col_stop:
-    if st.button("Stop Bot", type="secondary", disabled=not running):
-        _stop_bot()
-        st.rerun()
-with col_refresh:
-    if st.button("Refresh status"):
-        st.rerun()
-
-st.write("")
-with st.expander("Live Log (last 150 lines)", expanded=False):
-    log_content = _read_log_tail(150)
-    st.code(log_content, language="text")
