@@ -14,6 +14,12 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+HF_SPACE_REPO = "Fabio14i/oracle-live"
+
+LFS_FILES = [
+    "oracle_brain.pkl",
+    "Matches.csv",
+]
 CONTROL_FILE = os.path.join(DATA_DIR, "control.json")
 BOT_PROCESS: subprocess.Popen | None = None
 BOT_LOCK = threading.Lock()
@@ -117,8 +123,36 @@ def bot_watcher():
                 stop_bot()
 
 
+def resolve_lfs_files():
+    """Download actual LFS file content from HF Space repo if only pointer is present."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        print("huggingface_hub not installed, skipping LFS resolve")
+        return
+    for fname in LFS_FILES:
+        local_path = os.path.join(BASE_DIR, fname)
+        if not os.path.exists(local_path):
+            continue
+        with open(local_path, "rb") as f:
+            header = f.read(50)
+        if header.startswith(b"version https://git-lfs.github.com"):
+            print(f"Downloading LFS file: {fname}")
+            try:
+                downloaded = hf_hub_download(
+                    repo_id=HF_SPACE_REPO,
+                    filename=fname,
+                    repo_type="space",
+                )
+                shutil.copy2(downloaded, local_path)
+                print(f"  OK: {fname}")
+            except Exception as e:
+                print(f"  ERROR downloading {fname}: {e}")
+
+
 def main():
     ensure_data_dir()
+    resolve_lfs_files()
     sync_files_to_data()
     link_data_files()
 
