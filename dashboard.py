@@ -114,8 +114,14 @@ WEB_STATS_PATH = os.path.join(BASE_DIR, "web_stats.json")
 def load_dashboard_data():
     if not os.path.exists(WEB_STATS_PATH):
         return None
-    with open(WEB_STATS_PATH, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with open(WEB_STATS_PATH, "r", encoding="utf-8") as handle:
+            content = handle.read().strip()
+            if not content:
+                return None
+            return json.loads(content)
+    except Exception:
+        return None
 
 
 def load_training_data() -> pd.DataFrame:
