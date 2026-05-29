@@ -21,6 +21,7 @@ LFS_FILES = [
     "Matches.csv",
 ]
 CONTROL_FILE = os.path.join(DATA_DIR, "control.json")
+BOT_PID_FILE = os.path.join(DATA_DIR, "bot.pid")
 BOT_PROCESS: subprocess.Popen | None = None
 BOT_LOCK = threading.Lock()
 
@@ -77,6 +78,18 @@ def write_control(data: dict):
         json.dump(data, f)
 
 
+def write_pid(pid: int):
+    with open(BOT_PID_FILE, "w") as f:
+        f.write(str(pid))
+
+
+def clear_pid():
+    try:
+        os.remove(BOT_PID_FILE)
+    except FileNotFoundError:
+        pass
+
+
 def start_bot():
     global BOT_PROCESS
     with BOT_LOCK:
@@ -90,6 +103,7 @@ def start_bot():
             stderr=log_file,
             cwd=BASE_DIR,
         )
+        write_pid(BOT_PROCESS.pid)
 
 
 def stop_bot():
@@ -102,6 +116,7 @@ def stop_bot():
             except subprocess.TimeoutExpired:
                 BOT_PROCESS.kill()
         BOT_PROCESS = None
+        clear_pid()
 
 
 def bot_watcher():

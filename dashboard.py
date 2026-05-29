@@ -1,8 +1,5 @@
 ﻿import json
 import os
-import subprocess
-import sys
-import threading
 
 import pandas as pd
 import plotly.express as px
@@ -15,8 +12,7 @@ from config import PERFORMANCE_STARTING_BANKROLL, QUOTA, STAKE
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 _CONTROL_FILE = os.path.join(DATA_DIR, "control.json")
 _LOG_FILE = os.path.join(DATA_DIR, "oracle_live.log")
-_BOT_PROCESS: subprocess.Popen | None = None
-_BOT_LOCK = threading.Lock()
+_BOT_PID_FILE = os.path.join(DATA_DIR, "bot.pid")
 
 
 def _read_control() -> dict:
@@ -34,35 +30,27 @@ def _write_control(data: dict):
 
 
 def _bot_is_running() -> bool:
-    global _BOT_PROCESS
-    return _BOT_PROCESS is not None and _BOT_PROCESS.poll() is None
+    try:
+        with open(_BOT_PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
 
 
 def _start_bot():
-    global _BOT_PROCESS
-    with _BOT_LOCK:
-        if _bot_is_running():
-            return
-        base = os.path.dirname(os.path.abspath(__file__))
-        log = open(_LOG_FILE, "a")
-        _BOT_PROCESS = subprocess.Popen(
-            [sys.executable, os.path.join(base, "oracle_live.py")],
-            stdout=log, stderr=log, cwd=base,
-        )
     _write_control({"bot_enabled": True})
 
 
 def _stop_bot():
-    global _BOT_PROCESS
-    with _BOT_LOCK:
-        if _BOT_PROCESS and _BOT_PROCESS.poll() is None:
-            _BOT_PROCESS.terminate()
-            try:
-                _BOT_PROCESS.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _BOT_PROCESS.kill()
-        _BOT_PROCESS = None
     _write_control({"bot_enabled": False})
+    try:
+        with open(_BOT_PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 15)
+    except Exception:
+        pass
 
 
 def _read_log_tail(n: int = 100) -> str:
