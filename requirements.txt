@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 joblib
-python-telebot
+pyTelegramBotAPI
 requests
 plotly
 scikit-learn
