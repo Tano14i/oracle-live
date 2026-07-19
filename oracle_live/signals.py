@@ -9,6 +9,8 @@ from config import (
     API_KEY,
     CHANNEL_ID,
     CHAT_ID,
+    EV_GATE_ENABLED,
+    EV_MIN_EDGE,
     FREE_DELAY_SECONDS,
     QUOTA,
     STAKE,
@@ -20,7 +22,7 @@ from oracle_live import state
 from oracle_live.api_client import (
     fetch_fixture_stats,
     fetch_fixture_status,
-    fetch_next_goal_live_odds,
+    fetch_live_market_odds,
 )
 from oracle_live.constants import (
     FREE_ALLOWED_TIERS,
@@ -907,6 +909,7 @@ def radar_loop() -> None:
                 "live_stats_skip": 0,
                 "signals_opened": 0,
                 "shadow_opened": 0,
+                "ev_gate_skip": 0,
             }
             for match in data:
                 fixture_id = match["fixture"].get("id")
@@ -1110,6 +1113,8 @@ def radar_loop() -> None:
                     tier = assessment["tier"]
                     reason = assessment["reason"]
                     minute_bucket = get_minute_bucket(minute_value)
+                    live_odd = None
+                    ev_at_open = None
 
                     if not shadow_only:
                         skip_signal, skip_reason = should_skip_by_live_performance(market, league_name, minute_bucket)
@@ -1147,6 +1152,16 @@ def radar_loop() -> None:
                                 reason = f"{reason} | {titan_reason}" if reason and titan_reason else (titan_reason or reason)
                                 log_event("SIGNAL_PROMOTED", f"fixture_id={fixture_id} market={market} from={original_tier} to={tier} reason={titan_reason}")
 
+                        # EV gate: con la quota live disponibile si apre solo se il valore
+                        # atteso supera il margine minimo. Senza quota, comportamento storico.
+                        live_odd = fetch_live_market_odds(fixture_id, market, headers)
+                        if live_odd is not None:
+                            ev_at_open = round(prob * live_odd - 1.0, 4)
+                            if EV_GATE_ENABLED and ev_at_open < EV_MIN_EDGE:
+                                scan_debug["ev_gate_skip"] += 1
+                                log_event("EV_GATE_SKIP", f"key={signal_key} market={market} prob={prob:.3f} odd={live_odd} ev={ev_at_open:+.3f} min={EV_MIN_EDGE}")
+                                continue
+
                         with state_lock:
                             stats["segnali_inviati"].append(signal_key)
                         increment_analytics("signals_total")
@@ -1154,9 +1169,6 @@ def radar_loop() -> None:
                         increment_breakdown_counter("signals_by_market", market)
                         increment_breakdown_counter("signals_by_league", league_name)
                         increment_breakdown_counter("signals_by_minute_bucket", minute_bucket)
-                        live_odd = None
-                        if market == MARKET_NEXT_GOAL:
-                            live_odd = fetch_next_goal_live_odds(fixture_id, headers)
                         full_msg = format_signal_message(tier, country, match_up, dna, prob, minute_value, score, market, reason, live_odd=live_odd)
                         free_msg = format_free_teaser_message(tier, country, match_up, minute_value, score, market)
                         is_private_premium, private_premium_reason = is_premium_private_signal(
@@ -1244,6 +1256,8 @@ def radar_loop() -> None:
                         "ShotsInsideBoxAtOpen": shots_insidebox_at_open,
                         "GoalkeeperSavesAtOpen": goalkeeper_saves_at_open,
                         "XgRateAtOpen": xg_rate_at_open,
+                        "OddsAtOpen": live_odd if live_odd is not None else "",
+                        "EVAtOpen": ev_at_open if ev_at_open is not None else "",
                         "Status": "pending",
                         "Outcome": "",
                         "CloseScore": "",
@@ -1281,6 +1295,7 @@ def radar_loop() -> None:
                 f"live_stats_skip={scan_debug['live_stats_skip']} "
                 f"signals_opened={scan_debug['signals_opened']} "
                 f"shadow_opened={scan_debug['shadow_opened']} "
+                f"ev_gate_skip={scan_debug['ev_gate_skip']} "
             ))
             settle_missing_live_signals(seen_fixture_ids, headers)
             prune_settled_signals()

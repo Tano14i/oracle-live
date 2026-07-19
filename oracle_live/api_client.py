@@ -3,6 +3,7 @@ import time
 
 import requests
 
+from oracle_live.constants import LIVE_ODDS_BET_IDS
 from oracle_live.state import fixture_stats_cache, log_event
 
 def fetch_fixture_status(fixture_id: int, headers: dict):
@@ -141,8 +142,20 @@ def fetch_fixture_stats(fixture_id: int, headers: dict):
         print(f"Fetch fixture stats failed for {fixture_id}: {exc}")
         return None
 
+def fetch_live_market_odds(fixture_id: int, market: str, headers: dict):
+    """Quota live media per il market indicato, None se non mappato/disponibile."""
+    bet_id = LIVE_ODDS_BET_IDS.get(market)
+    if not bet_id:
+        return None
+    return fetch_live_odds_by_bet(fixture_id, bet_id, headers)
+
+
 def fetch_next_goal_live_odds(fixture_id: int, headers: dict):
-    cache_key = "ng_odds_" + str(fixture_id)
+    return fetch_live_odds_by_bet(fixture_id, 5, headers)
+
+
+def fetch_live_odds_by_bet(fixture_id: int, bet_id: int, headers: dict):
+    cache_key = f"odds_{bet_id}_" + str(fixture_id)
     now_ts = time.time()
     cached = fixture_stats_cache.get(cache_key)
     if isinstance(cached, dict) and now_ts - float(cached.get("ts", 0.0)) < 60:
@@ -150,7 +163,7 @@ def fetch_next_goal_live_odds(fixture_id: int, headers: dict):
     try:
         response = requests.get(
             "https://v3.football.api-sports.io/odds/live",
-            headers=headers, params={"fixture": fixture_id, "bet": 5}, timeout=10,
+            headers=headers, params={"fixture": fixture_id, "bet": bet_id}, timeout=10,
         )
         if response.status_code != 200:
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}

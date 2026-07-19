@@ -65,6 +65,17 @@ AUTO_RETRAIN_EVERY_N_SETTLED = int(get_setting("AUTO_RETRAIN_EVERY_N_SETTLED", "
 LIVE_TRAINING_DATA_PATH = resolve_path(get_setting("LIVE_TRAINING_DATA_PATH", "live_training_data.csv"))
 MISSING_TEAMS_QUEUE_PATH = resolve_path(get_setting("MISSING_TEAMS_QUEUE_PATH", "missing_teams_queue.json"))
 
+# --- EV gate: apri il segnale solo se prob * quota - 1 >= EV_MIN_EDGE ---
+# Il gate agisce solo quando la quota live e' disponibile; senza quota il
+# comportamento resta quello storico (soglie per tier).
+EV_GATE_ENABLED = get_setting("EV_GATE_ENABLED", "1") not in {"0", "false", "False", ""}
+EV_MIN_EDGE = float(get_setting("EV_MIN_EDGE", "0.03") or "0.03")
+# Bet id API-Football per le quote live dei mercati HT (0 = disabilitato).
+# NEXT GOAL LIVE usa gia' bet=5. Imposta gli id corretti del tuo piano API
+# per attivare il gate anche sui mercati Over HT.
+LIVE_ODDS_BET_ID_OVER05_HT = int(get_setting("LIVE_ODDS_BET_ID_OVER05_HT", "0") or "0")
+LIVE_ODDS_BET_ID_OVER15_HT = int(get_setting("LIVE_ODDS_BET_ID_OVER15_HT", "0") or "0")
+
 
 
 
