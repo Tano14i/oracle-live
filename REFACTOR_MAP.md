@@ -36,12 +36,12 @@ precedenza al package per `import oracle_live`; il file resta eseguibile come sc
 
 ## constants.py
 
-Costanti pure, nessuna dipendenza interna (solo `config`, `os`).
+Costanti pure, nessuna dipendenza interna (solo `os`).
 
 | Simbolo (righe originali) | Note |
 |---|---|
-| `BASE_DIR` (61) | definito qui, importato dagli altri moduli |
-| `required_settings` + check `missing_settings` → `RuntimeError` (79–84, 139–143) | resta a livello modulo: l'errore di config mancante scatta all'import, identico a oggi |
+| `BASE_DIR` (61) | definito qui, importato dagli altri moduli. **Adattamento necessario**: nel package `__file__` sta in `oracle_live/`, quindi diventa `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` per continuare a puntare alla root del repo (stessi path dati di oggi) |
+| `required_settings` + check `missing_settings` → `RuntimeError` (79–84, 139–143) | **spostato in state.py** (review): deve girare nello stesso modulo e PRIMA di `bot = telebot.TeleBot(...)`, così con `.env` mancante l'errore all'avvio resta identico |
 | `LIVE_TRAINING_COLUMNS` (85–117) | |
 | `TITAN_PRESSURE_MODEL_PATH` (118) | |
 | `V2_MODEL_PATH`, `V2_THRESHOLD_PATH`, `V2_DEFAULT_THRESHOLD` (121–123) | |
@@ -72,6 +72,7 @@ Nessun altro modulo definisce lock propri.
 
 | Simbolo | Note |
 |---|---|
+| `required_settings` (79–84) + check `missing_settings` → `RuntimeError` (139–143) | (review) nello stesso modulo e PRIMA della creazione del bot, stesso ordine relativo del monolite: con `.env` mancante l'errore all'avvio resta identico |
 | `bot = telebot.TeleBot(TOKEN_LIVE)` (145) | deviazione 4: singleton condiviso, serve a messaging/handlers/vip senza cicli |
 | `logger` + setup handler (169–175), `log_event` (309–313) | deviazione 4 |
 | `membership_store` (153) | deviazione 4 |
@@ -288,9 +289,14 @@ Identici. `.bat`/`.ps1`/`launcher.py` continuano a lanciare `python oracle_live.
   `prematch_running`, `dashboard_process`, `ngrok_process`, `last_retrain_result`,
   `last_vip_sync_ts`, `missing_team_queue`, `df_matches`, `nomi_unici_db`,
   `team_match_cache`, `normalized_team_lookup`, `team_not_found_counts`) vengono acceduti
-  come attributo `state.X` dagli altri moduli (unica trasformazione testuale necessaria:
-  `oracle_brain` → `state.oracle_brain` ecc., `global X` → rimosso/`state.X = ...`).
-  Nessun cambio di logica: stessa semantica di lettura/scrittura condivisa del monolite.
+  come attributo `state.X` dagli altri moduli — **sia in scrittura che in lettura** (review):
+  un `from state import oracle_brain` congelerebbe il riferimento al load e non vedrebbe
+  mai il retrain. Unica trasformazione testuale: `oracle_brain` → `state.oracle_brain` ecc.,
+  `global X` → rimosso/`state.X = ...`. Nessun cambio di logica.
+- **Verifica meccanica a fine estrazione** (review): nessun import per nome dei 18 ribindati —
+  `grep -rn "from oracle_live.state import\|from .state import" oracle_live/` non deve
+  contenere nessuno dei 18 nomi; inoltre nessuna occorrenza "nuda" dei 18 nomi fuori da
+  `state.py`/`state.X`.
 
 ## Deviazioni dal brief (riepilogo)
 
@@ -322,31 +328,48 @@ Identici. `.bat`/`.ps1`/`launcher.py` continuano a lanciare `python oracle_live.
     `models.format_ml_status`/runtime → in signals creerebbero il ciclo models↔signals.
 12. **`oracle_live/__init__.py` importa `handlers`**: così `import oracle_live` produce gli
     stessi effetti collaterali del monolite (creazione bot, registrazione handler, logger,
-    check config). `main.py` aggiunto come entrypoint alternativo.
+    check config). `main.py` aggiunto come entrypoint alternativo. (Review) Verificato che
+    non ci sono doppie esecuzioni: i moduli girano una sola volta grazie a `sys.modules`
+    (handler registrati una volta, un solo `TeleBot`, un solo `FileHandler` — la guardia
+    `if not logger.handlers:` resta comunque in `state.py` tal quale); lo shim ha `main()`
+    sotto guardia `if __name__ == "__main__"`, quindi il suo import non esegue nulla che
+    nel monolite girava solo sotto `__main__`.
+13. **`required_settings` + check in `state.py`** (review, non più in constants.py): stesso
+    modulo e stesso ordine relativo rispetto a `bot = telebot.TeleBot(...)` → con `.env`
+    mancante l'errore di avvio resta identico.
+14. **`BASE_DIR` nel package**: `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`
+    (parent di `oracle_live/`) per continuare a puntare alla root del repo: tutti i path
+    dati restano invariati.
 
 ## Piano commit (un modulo per commit)
 
 Durante la migrazione il monolite resta intatto; i moduli vengono creati nel package e il
 monolite viene sostituito con lo shim solo nell'ultimo commit di codice.
 
+L'ordine rispetta le dipendenze reali emerse dalla mappa (messaging prima di filters che
+usa `send_html_message_safe` nel backfill; reporting/models/vip prima di signals che li
+chiama da `chiudi_scommessa`/`radar_loop`; runtime prima di handlers che importa i job
+dashboard e `stop_radar`/`request_shutdown`):
+
 1. `REFACTOR_MAP.md` (questo file)
 2. `oracle_live/constants.py` (+ `__init__.py` vuoto provvisorio)
 3. `oracle_live/state.py`
 4. `oracle_live/api_client.py`
-5. `oracle_live/filters.py`
-6. `oracle_live/markets.py`
-7. `oracle_live/guards.py`
-8. `oracle_live/models.py`
-9. `oracle_live/messaging.py`
-10. `oracle_live/signals.py`
-11. `oracle_live/vip.py`
-12. `oracle_live/prematch.py`
-13. `oracle_live/reporting.py`
-14. `oracle_live/handlers.py`
-15. `oracle_live/runtime.py` + shim `oracle_live.py` + `main.py` + `__init__.py` definitivo
-16. README: nuova struttura cartelle
+5. `oracle_live/markets.py`
+6. `oracle_live/messaging.py`
+7. `oracle_live/filters.py`
+8. `oracle_live/guards.py`
+9. `oracle_live/models.py`
+10. `oracle_live/reporting.py`
+11. `oracle_live/prematch.py`
+12. `oracle_live/vip.py`
+13. `oracle_live/signals.py`
+14. `oracle_live/runtime.py`
+15. `oracle_live/handlers.py`
+16. Wire-up: `__init__.py` definitivo + shim `oracle_live.py` + `main.py`
+17. README: nuova struttura cartelle
 
-Dopo ogni commit: `python -c "import oracle_live.<modulo>"` (e dal commit 15
+Dopo ogni commit: `python -c "import oracle_live.<modulo>"` (e dal commit 16
 `python -c "import oracle_live"` + avvio a secco). Non esistono test nel repo
 (nessun `test_oracle_live*`; i `test_*.py` presenti sono script manuali di prova API).
 
