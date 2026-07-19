@@ -14,7 +14,24 @@ Progetto Python per analisi storica, training di un modello semplice, invio di s
 
 ## File principali
 
-- `oracle_live.py`: runtime live principale con Telegram bot, polling API, filtri campionati, market HT, messaggi editabili, funnel free e VIP billing.
+- `oracle_live.py`: shim di avvio retro-compatibile (`python oracle_live.py` continua a funzionare); il codice vive nel package `oracle_live/`.
+- `main.py`: entrypoint equivalente allo shim (`python main.py`).
+- `oracle_live/`: package del runtime live (Telegram bot, polling API, filtri campionati, market HT, messaggi editabili, funnel free e VIP billing), diviso in moduli:
+  - `constants.py`: tier, market, preset, filtri, soglie, liste PREMIUM_*, `LEGACY_TIER_KEYS`.
+  - `state.py`: dict `stats`, lock, singleton condivisi (`bot`, `logger`, `membership_store`), persistenza `salva_dati_web`, helper CSV live-training.
+  - `api_client.py`: helper HTTP API-Football (status/statistiche fixture, quote live) e cache.
+  - `markets.py`: `MARKET_PRESETS`, market router, finestre e vincitori market.
+  - `messaging.py`: formattazione messaggi, `escape_html`, `send_html_message_safe`, teaser free.
+  - `filters.py`: filtri campionati/paesi, normalizzazioni, alias e matching squadre, coverage guard, coda missing-team.
+  - `guards.py`: guard su performance live e statistiche live.
+  - `models.py`: caricamento modelli (v2 + threshold, titan pressure), retrain.
+  - `reporting.py`: analytics, recap giornalieri, performance report, /xcopy /xpromo.
+  - `prematch.py`: report prematch, watch state, delta, loop di monitoraggio.
+  - `vip.py`: billing Telegram Stars, sync membri, inviti/revoche, reminder.
+  - `signals.py`: apertura/chiusura segnali, tracker, esiti, radar loop.
+  - `handlers.py`: tutti gli handler telebot (comandi + tastiere).
+  - `runtime.py`: process lock, boot (`main()`), dashboard/ngrok, shutdown, polling.
+  - La mappa completa funzione → modulo è in `REFACTOR_MAP.md`.
 - `vip_membership.py`: storage SQLite per iscritti VIP e fatture.
 - `dashboard.py`: dashboard Streamlit che legge `web_stats.json`.
 - `backtest.py`: genera `cleaned_training_data.csv` a partire da `Matches.csv`.
