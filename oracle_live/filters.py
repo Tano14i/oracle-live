@@ -387,9 +387,15 @@ def trova_squadra(nome_live: str, country: str = "", league_name: str = ""):
                 best_simple_match = original_names[0]
 
     if best_simple_match and best_simple_ratio >= 0.88:
+        if best_simple_ratio < 0.92:
+            # Match fuzzy a bassa confidenza: se e' sbagliato avvelena metriche e
+            # dataset di training. Loggato per revisione manuale.
+            log_event("TEAM_MATCH_FUZZY", f"live={nome_live} matched={best_simple_match} ratio={best_simple_ratio:.3f} mode=simple country={country or '-'} league={league_name or '-'}")
         state.team_match_cache[norm_live] = best_simple_match
         return best_simple_match
     if best_match and best_ratio >= 0.86:
+        if best_ratio < 0.92:
+            log_event("TEAM_MATCH_FUZZY", f"live={nome_live} matched={best_match} ratio={best_ratio:.3f} mode=full country={country or '-'} league={league_name or '-'}")
         state.team_match_cache[norm_live] = best_match
         return best_match
 
