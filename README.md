@@ -32,6 +32,14 @@ Progetto Python per analisi storica, training di un modello semplice, invio di s
   - `handlers.py`: tutti gli handler telebot (comandi + tastiere).
   - `runtime.py`: process lock, boot (`main()`), dashboard/ngrok, shutdown, polling.
   - La mappa completa funzione → modulo è in `REFACTOR_MAP.md`.
+- `analyze_performance.py`: report WR/ROI/calibrazione sul dataset live (`python analyze_performance.py`).
+
+## Modello ed EV gate
+
+- Il modello ora riceve il **mercato come feature** (one-hot O0.5 HT / O1.5 HT / Next Goal) piu' tiri in area, parate e xG-rate al momento dell'apertura; le probabilita' sono **calibrate** (sigmoid, isotonic sopra 400 righe settled), quindi `Prob` e' utilizzabile per il valore atteso.
+- **EV gate**: quando la quota live e' disponibile, un segnale pubblico apre solo se `prob * quota - 1 >= EV_MIN_EDGE` (default 3%). Next Goal usa gia' le quote live (bet=5); per attivare il gate sui mercati HT imposta `LIVE_ODDS_BET_ID_OVER05_HT` / `LIVE_ODDS_BET_ID_OVER15_HT` in `.env`. Quota ed EV all'apertura vengono salvati nel dataset (`OddsAtOpen`, `EVAtOpen`).
+- Le guardie "cold" su mercati/leghe/fasce orarie ora scattano solo con campioni statisticamente sensati (15/12/12 esiti giornalieri) invece di 4-5.
+- Dopo il primo retrain con il nuovo trainer, usa `python analyze_performance.py` per verificare calibrazione e ROI per fascia di quota.
 - `vip_membership.py`: storage SQLite per iscritti VIP e fatture.
 - `dashboard.py`: dashboard Streamlit che legge `web_stats.json`.
 - `backtest.py`: genera `cleaned_training_data.csv` a partire da `Matches.csv`.
