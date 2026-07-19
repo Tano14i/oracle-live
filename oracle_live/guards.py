@@ -7,6 +7,18 @@ from oracle_live.state import (
     stats,
 )
 
+# Campioni minimi prima che una guardia possa bloccare un mercato/lega/fascia.
+# I vecchi valori (4-5 esiti giornalieri, 6-8 rolling) reagivano a puro rumore:
+# con 5 bet una sequenza 2W-3L e' del tutto normale anche con WR reale al 55%.
+DAILY_MARKET_MIN_SETTLED = 15
+DAILY_LEAGUE_MIN_SETTLED = 12
+DAILY_MINUTE_MIN_SETTLED = 12
+ROLLING_MARKET_MIN_20 = 12
+ROLLING_MARKET_MIN_50 = 25
+ROLLING_LEAGUE_MIN_20 = 10
+ROLLING_MINUTE_MIN_20 = 10
+
+
 def check_negative_window(stats_bucket: dict, min_total: int, min_wr: float) -> bool:
     total = int(stats_bucket.get("WIN", 0)) + int(stats_bucket.get("LOSS", 0))
     if total < min_total:
@@ -19,33 +31,33 @@ def should_skip_by_live_performance(market: str, league_name: str, minute_bucket
 
     market_stats = get_settled_bucket_stats(analytics.get("settled_by_market"), market)
     market_total = market_stats["WIN"] + market_stats["LOSS"]
-    if market_total >= 5 and market_stats["WIN"] / max(1, market_total) < 0.40:
+    if market_total >= DAILY_MARKET_MIN_SETTLED and market_stats["WIN"] / max(1, market_total) < 0.40:
         return True, f"market {market} under 40% today"
 
     league_stats = get_settled_bucket_stats(analytics.get("settled_by_league"), league_name)
     league_total = league_stats["WIN"] + league_stats["LOSS"]
-    if league_total >= 4 and league_stats["WIN"] / max(1, league_total) < 0.35:
+    if league_total >= DAILY_LEAGUE_MIN_SETTLED and league_stats["WIN"] / max(1, league_total) < 0.35:
         return True, f"league {league_name} cold today"
 
     minute_stats = get_settled_bucket_stats(analytics.get("settled_by_minute_bucket"), minute_bucket)
     minute_total = minute_stats["WIN"] + minute_stats["LOSS"]
-    if minute_total >= 4 and minute_stats["WIN"] / max(1, minute_total) < 0.35:
+    if minute_total >= DAILY_MINUTE_MIN_SETTLED and minute_stats["WIN"] / max(1, minute_total) < 0.35:
         return True, f"minute zone {minute_bucket} cold today"
 
     market_last_20 = get_rolling_bucket_stats("market", market, 20)
-    if check_negative_window(market_last_20, 8, 0.40):
+    if check_negative_window(market_last_20, ROLLING_MARKET_MIN_20, 0.40):
         return True, f"market {market} weak on last 20"
 
     market_last_50 = get_rolling_bucket_stats("market", market, 50)
-    if check_negative_window(market_last_50, 15, 0.42):
+    if check_negative_window(market_last_50, ROLLING_MARKET_MIN_50, 0.42):
         return True, f"market {market} weak on last 50"
 
     league_last_20 = get_rolling_bucket_stats("league_name", league_name, 20)
-    if check_negative_window(league_last_20, 6, 0.33):
+    if check_negative_window(league_last_20, ROLLING_LEAGUE_MIN_20, 0.33):
         return True, f"league {league_name} weak on last 20"
 
     minute_last_20 = get_rolling_bucket_stats("minute_bucket", minute_bucket, 20)
-    if check_negative_window(minute_last_20, 6, 0.33):
+    if check_negative_window(minute_last_20, ROLLING_MINUTE_MIN_20, 0.33):
         return True, f"minute zone {minute_bucket} weak on last 20"
 
     return False, ""
