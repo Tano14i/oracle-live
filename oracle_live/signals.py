@@ -547,6 +547,9 @@ def get_market_debug_status(
     total_shots_at_open = float(stats_payload.get("total_shots", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
     corners_at_open = float(stats_payload.get("corners", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
     red_cards_at_open = float(stats_payload.get("red_cards", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+    shots_insidebox_at_open = float(stats_payload.get("shots_insidebox", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+    goalkeeper_saves_at_open = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+    xg_rate_at_open = get_xg_rate(stats_payload, minute_value)
     titan_pressure_score = float(titan_soft.get("score", 0.0) or 0.0)
     titan_pressure_prob = predict_titan_pressure_prob(dna, minute_value, 0, total_goals, stats_payload)
 
@@ -566,6 +569,12 @@ def get_market_debug_status(
         "CornersAtOpen": corners_at_open,
         "RedCardsAtOpen": red_cards_at_open,
         "TitanPressureScore": titan_pressure_score,
+        "MarketOver05HT": 1.0 if market == MARKET_OVER05_HT else 0.0,
+        "MarketOver15HT": 1.0 if market == MARKET_OVER15_HT else 0.0,
+        "MarketNextGoal": 1.0 if market == MARKET_NEXT_GOAL else 0.0,
+        "ShotsInsideBoxAtOpen": shots_insidebox_at_open,
+        "GoalkeeperSavesAtOpen": goalkeeper_saves_at_open,
+        "XgRateAtOpen": xg_rate_at_open,
     }
     x_input = pd.DataFrame(
         [[model_feature_values.get(column, 0.0) for column in model_feature_columns]],
@@ -974,6 +983,9 @@ def radar_loop() -> None:
                 total_shots_at_open = float(stats_payload.get("total_shots", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 corners_at_open = float(stats_payload.get("corners", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 red_cards_at_open = float(stats_payload.get("red_cards", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+                shots_insidebox_at_open = float(stats_payload.get("shots_insidebox", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+                goalkeeper_saves_at_open = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
+                xg_rate_at_open = get_xg_rate(stats_payload, minute_value)
                 dna = combined_metrics["avg_total_goals"]
                 model_feature_columns = list(getattr(state.oracle_brain, "feature_names_in_", TRAINER_FEATURE_COLUMNS))
                 xg_threshold_bonus = 0.0
@@ -1005,6 +1017,12 @@ def radar_loop() -> None:
                         "CornersAtOpen": corners_at_open,
                         "RedCardsAtOpen": red_cards_at_open,
                         "TitanPressureScore": titan_pressure_score,
+                        "MarketOver05HT": 1.0 if market == MARKET_OVER05_HT else 0.0,
+                        "MarketOver15HT": 1.0 if market == MARKET_OVER15_HT else 0.0,
+                        "MarketNextGoal": 1.0 if market == MARKET_NEXT_GOAL else 0.0,
+                        "ShotsInsideBoxAtOpen": shots_insidebox_at_open,
+                        "GoalkeeperSavesAtOpen": goalkeeper_saves_at_open,
+                        "XgRateAtOpen": xg_rate_at_open,
                     }
                     x_input = pd.DataFrame([[model_feature_values.get(column, 0.0) for column in model_feature_columns]], columns=model_feature_columns)
                     prob = state.oracle_brain.predict_proba(x_input)[0][1]
@@ -1223,6 +1241,9 @@ def radar_loop() -> None:
                         "CornersAtOpen": corners_at_open,
                         "RedCardsAtOpen": red_cards_at_open,
                         "TitanPressureScore": titan_pressure_score,
+                        "ShotsInsideBoxAtOpen": shots_insidebox_at_open,
+                        "GoalkeeperSavesAtOpen": goalkeeper_saves_at_open,
+                        "XgRateAtOpen": xg_rate_at_open,
                         "Status": "pending",
                         "Outcome": "",
                         "CloseScore": "",
