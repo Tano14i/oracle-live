@@ -40,48 +40,57 @@ def main() -> int:
     path = LIVE_TRAINING_DATA_PATH
     if len(sys.argv) > 1:
         path = sys.argv[1]
-    if not os.path.exists(path):
-        print(f"Dataset non trovato: {path}")
-        return 1
+    report = build_report(path)
+    print(report)
+    return 0 if not report.startswith("Dataset non trovato") else 1
 
+
+def build_report(path: str | None = None) -> str:
+    """Costruisce il report come testo (usato dalla CLI e dal comando /analisi del bot)."""
+    if not path:
+        path = LIVE_TRAINING_DATA_PATH
+    if not os.path.exists(path):
+        return f"Dataset non trovato: {path}"
+
+    lines = []
     df = pd.read_csv(path)
     settled = df[df["Outcome"].isin(["WIN", "LOSS"])].copy()
-    print(f"Dataset: {path}")
-    print(f"Righe totali: {len(df)} | settled WIN/LOSS: {len(settled)}")
+    lines.append(f"Dataset: {path}")
+    lines.append(f"Righe totali: {len(df)} | settled WIN/LOSS: {len(settled)}")
     if settled.empty:
-        print("Nessuna riga settled: niente da analizzare.")
-        return 0
+        lines.append("Nessuna riga settled: niente da analizzare.")
+        return "\n".join(lines)
 
     public = settled[settled["Tier"].isin(PUBLIC_TIERS)].copy()
     shadow = settled[~settled["Tier"].isin(PUBLIC_TIERS)]
-    print(f"Segnali pubblici: {len(public)} | shadow/learning: {len(shadow)}")
-    print(f"Breakeven a quota {QUOTA}: WR {breakeven_wr(QUOTA) * 100:.1f}%")
+    lines.append(f"Segnali pubblici: {len(public)} | shadow/learning: {len(shadow)}")
+    lines.append(f"Breakeven a quota {QUOTA}: WR {breakeven_wr(QUOTA) * 100:.1f}%")
 
     if public.empty:
-        print("Nessun segnale pubblico settled.")
-        return 0
+        lines.append("Nessun segnale pubblico settled.")
+        return "\n".join(lines)
 
-    print("\n== WR per MERCATO (segnali pubblici) ==")
-    print(wr_table(public, "Market", QUOTA).to_string())
+    lines.append("\n== WR per MERCATO (segnali pubblici) ==")
+    lines.append(wr_table(public, "Market", QUOTA).to_string())
 
-    print("\n== WR per TIER ==")
-    print(wr_table(public, "Tier", QUOTA).to_string())
+    lines.append("\n== WR per TIER ==")
+    lines.append(wr_table(public, "Tier", QUOTA).to_string())
 
     if "MinuteBucket" in public.columns:
-        print("\n== WR per MERCATO x FASCIA MINUTI ==")
-        print(wr_table(public, ["Market", "MinuteBucket"], QUOTA).to_string())
+        lines.append("\n== WR per MERCATO x FASCIA MINUTI ==")
+        lines.append(wr_table(public, ["Market", "MinuteBucket"], QUOTA).to_string())
 
     if "LeagueName" in public.columns:
         by_league = wr_table(public, "LeagueName", QUOTA)
-        print("\n== WR per LEGA (>= 10 bet) ==")
-        print(by_league[by_league["bets"] >= 10].to_string())
+        lines.append("\n== WR per LEGA (>= 10 bet) ==")
+        lines.append(by_league[by_league["bets"] >= 10].to_string())
 
     if "Prob" in public.columns:
         probs = pd.to_numeric(public["Prob"], errors="coerce")
         public["prob_bin"] = pd.cut(probs, [0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-        print("\n== CALIBRAZIONE: WR reale per fascia di Prob del modello ==")
-        print("(se WR reale << fascia, il modello e' sovraconfidente e l'EV gate va stretto)")
-        print(wr_table(public.dropna(subset=["prob_bin"]), "prob_bin", QUOTA).to_string())
+        lines.append("\n== CALIBRAZIONE: WR reale per fascia di Prob del modello ==")
+        lines.append("(se WR reale << fascia, il modello e' sovraconfidente e l'EV gate va stretto)")
+        lines.append(wr_table(public.dropna(subset=["prob_bin"]), "prob_bin", QUOTA).to_string())
 
     if "OddsAtOpen" in public.columns:
         odds = pd.to_numeric(public["OddsAtOpen"], errors="coerce")
@@ -102,12 +111,12 @@ def main() -> int:
                     "ROI% quota reale": round(group["unit_pl"].mean() * 100, 1),
                 })
 
-            print("\n== ROI con QUOTA REALE per fascia di quota (righe con OddsAtOpen) ==")
-            print(with_odds.groupby("odds_bin", observed=True).apply(roi_real, include_groups=False).to_string())
+            lines.append("\n== ROI con QUOTA REALE per fascia di quota (righe con OddsAtOpen) ==")
+            lines.append(with_odds.groupby("odds_bin", observed=True).apply(roi_real, include_groups=False).to_string())
         else:
-            print("\nNessuna riga con OddsAtOpen valorizzata (il campo si popola dai nuovi segnali).")
+            lines.append("\nNessuna riga con OddsAtOpen valorizzata (il campo si popola dai nuovi segnali).")
 
-    return 0
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

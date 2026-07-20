@@ -251,6 +251,7 @@ def format_commands_help() -> str:
         "/analytics: daily analytics summary.\n"
         "/admin: full admin panel.\n"
         "/ml_status: dataset and ML model status.\n"
+        "ANALISI or /analisi: WR/ROI/calibration report from the live dataset.\n"
         "/dashboard_web: start the mobile dashboard and send the local link.\n"
         "/dashboard_public: start the public dashboard and send the ngrok link.\n"
         "/dashboard_restart: restart Streamlit and relaunch the dashboard link.\n"

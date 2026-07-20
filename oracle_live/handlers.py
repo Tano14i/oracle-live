@@ -20,6 +20,7 @@ from oracle_live.filters import (
 )
 from oracle_live.markets import get_market_label, set_market_mode
 from oracle_live.messaging import (
+    escape_html,
     format_commands_help,
     format_signal_legend,
     is_admin_message,
@@ -74,7 +75,7 @@ def build_main_keyboard():
     kb.add("PREMATCH WATCH ON", "PREMATCH WATCH OFF")
     kb.add("MENU FILTRI", "MENU MARKET")
     kb.add('MENU VIP', 'COMANDI')
-    kb.add('LEGEND')
+    kb.add('LEGEND', 'ANALISI')
     return kb
 
 
@@ -206,6 +207,46 @@ def ml_status_cmd(message):
     if not require_admin_access(message):
         return
     bot.send_message(message.chat.id, format_ml_status(), parse_mode="HTML")
+
+
+def start_performance_analysis_job(chat_id: int) -> str:
+    def analysis_worker():
+        try:
+            from analyze_performance import build_report
+            report = build_report()
+            # invio a blocchi in <pre> per tenere le tabelle allineate su mobile
+            chunk = ""
+            chunks = []
+            for line in report.splitlines(True):
+                if len(chunk) + len(line) > 3000 and chunk:
+                    chunks.append(chunk)
+                    chunk = line
+                else:
+                    chunk += line
+            if chunk:
+                chunks.append(chunk)
+            for piece in chunks[:6]:
+                bot.send_message(chat_id, f"<pre>{escape_html(piece)}</pre>", parse_mode="HTML")
+        except Exception as exc:
+            log_event("ANALYSIS_JOB_ERROR", str(exc))
+            bot.send_message(chat_id, f"Analisi fallita: {exc}")
+
+    threading.Thread(target=analysis_worker, daemon=True, name="oracle-analysis").start()
+    return "Analisi performance avviata: il report arriva qui tra pochi secondi."
+
+
+@bot.message_handler(commands=["analisi"])
+def analisi_cmd(message):
+    if not require_admin_access(message):
+        return
+    bot.send_message(message.chat.id, start_performance_analysis_job(message.chat.id))
+
+
+@bot.message_handler(func=lambda message: message.text == "ANALISI")
+def analisi_button_cmd(message):
+    if not require_admin_access(message):
+        return
+    bot.send_message(message.chat.id, start_performance_analysis_job(message.chat.id))
 
 @bot.message_handler(commands=["retrain"])
 def retrain_cmd(message):
