@@ -1,0 +1,7 @@
+# Dipendenze minime del solo bot (per Termux/ambienti leggeri).
+# numpy/pandas/scikit-learn NON sono qui: su Termux vanno installate coi
+# pacchetti di sistema (vedi deploy/setup_termux.sh), via pip non compilano.
+# Esclusi anche streamlit/plotly/pyarrow: servono solo alla dashboard web.
+pyTelegramBotAPI
+requests
+joblib

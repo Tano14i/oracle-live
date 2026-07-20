@@ -74,8 +74,50 @@ Per un bot con pagamenti VIP e dataset che cresce, il VPS resta più affidabile.
 ## Opzione C — hardware di casa senza PC
 
 - **Raspberry Pi** (anche un Pi 3/4 usato): stessa procedura dell'opzione A.
-- **Vecchio telefono Android con Termux**: funziona, ma fragile (kill in background,
-  reboot); sconsigliato per il VIP billing.
+- **Telefono Android con Termux**: procedura sotto. Costo zero, ma leggi le avvertenze.
+
+### Setup su Termux (Android)
+
+Dentro l'app Termux, incolla in ordine:
+
+```bash
+pkg update -y && pkg install -y git git-lfs
+git clone https://github.com/Tano14i/oracle-live.git
+cd oracle-live
+git checkout claude/oracle-live-refactor-kicsmd   # o main dopo il merge
+bash deploy/setup_termux.sh
+nano .env                          # inserisci TOKEN_LIVE, CHAT_ID, CHANNEL_ID, API_KEY...
+bash deploy/start_bot_termux.sh    # avvia il bot (resta aperto, con auto-riavvio)
+```
+
+Poi, nelle impostazioni Android (una volta sola):
+
+1. **Batteria → Termux → Nessuna restrizione** (altrimenti Android uccide il bot).
+2. Non chiudere Termux dalle app recenti: lascialo in background (la notifica
+   con il lucchetto indica il wake-lock attivo).
+3. Facoltativo ma consigliato: installa **Termux:Boot** (da F-Droid) per far
+   ripartire il bot al riavvio del telefono — crea `~/.termux/boot/oracle.sh` con:
+
+   ```bash
+   #!/data/data/com.termux/files/usr/bin/bash
+   bash ~/oracle-live/deploy/start_bot_termux.sh
+   ```
+
+Per portare i dati storici dal PC (membri VIP, dataset live) senza ripartire da zero:
+mandati i file via Telegram (Messaggi salvati) o Google Drive, salvali in Download,
+poi in Termux:
+
+```bash
+termux-setup-storage    # autorizza l'accesso ai file (una volta)
+cp /sdcard/Download/vip_members.db /sdcard/Download/live_training_data.csv /sdcard/Download/web_stats.json ~/oracle-live/ 2>/dev/null
+```
+
+**Avvertenze oneste**: il bot vive solo finché il telefono è acceso e connesso;
+se usi questo stesso telefono tutti i giorni, un riavvio o la modalità aereo lo
+fermano (e con lui i segnali e il monitoraggio VIP). Per iniziare gratis va
+benissimo; quando il canale VIP inizia a incassare, sposta il bot su un VPS
+(opzione A) o su Oracle Cloud Always Free — la migrazione è: copia dei file
+dati + stessa procedura di setup.
 
 ## Nota sui dati
 
