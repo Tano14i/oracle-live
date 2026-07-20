@@ -1,0 +1,23 @@
+# Unit systemd per Oracle Live bot.
+# Installazione (da deploy/setup_vps.sh o manuale):
+#   sudo cp deploy/oracle-live.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oracle-live
+[Unit]
+Description=Oracle Live Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oracle
+WorkingDirectory=/opt/oracle-live
+ExecStart=/opt/oracle-live/.venv/bin/python /opt/oracle-live/oracle_live.py
+Restart=always
+RestartSec=10
+# Il bot scrive log anche su oracle_live.log; journald cattura stdout/stderr.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
