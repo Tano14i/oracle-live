@@ -6,7 +6,20 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import PERFORMANCE_STARTING_BANKROLL, QUOTA, STAKE
+from config import (
+    PERFORMANCE_STARTING_BANKROLL,
+    QUOTA,
+    QUOTA_NEXT_GOAL,
+    QUOTA_O05_HT,
+    QUOTA_O15_HT,
+    STAKE,
+)
+
+MARKET_QUOTAS = {
+    "OVER 0.5 HT": QUOTA_O05_HT,
+    "OVER 1.5 HT": QUOTA_O15_HT,
+    "NEXT GOAL LIVE": QUOTA_NEXT_GOAL,
+}
 
 # --- Bot control helpers (used by the Control Room tab) ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -302,7 +315,9 @@ def compute_profit_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     working = df.copy()
     working["profit_eur"] = 0.0
-    working.loc[working["DisplayOutcome"] == "WIN", "profit_eur"] = (QUOTA - 1) * STAKE
+    win_mask = working["DisplayOutcome"] == "WIN"
+    win_quota = working.loc[win_mask, "Market"].map(lambda value: MARKET_QUOTAS.get(value, QUOTA))
+    working.loc[win_mask, "profit_eur"] = (win_quota - 1) * STAKE
     working.loc[working["DisplayOutcome"] == "LOSS", "profit_eur"] = -STAKE
     return working
 

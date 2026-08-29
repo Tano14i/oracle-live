@@ -49,6 +49,17 @@ LOG_FILE_PATH = resolve_path(get_setting("LOG_FILE_PATH", "oracle_live.log"))
 
 STAKE = float(get_setting("STAKE", "10.0") or "10.0")
 QUOTA = float(get_setting("QUOTA", "1.75") or "1.75")
+
+# Quote medie reali per market: usate per P/L, ROI e breakeven onesti.
+# OVER 0.5 HT aperto presto a 0-0 quota tipicamente 1.25-1.40, non 1.75.
+QUOTA_O05_HT = float(get_setting("QUOTA_O05_HT", "1.30") or "1.30")
+QUOTA_O15_HT = float(get_setting("QUOTA_O15_HT", "1.50") or "1.50")
+QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", str(QUOTA)) or str(QUOTA))
+
+# Finestra HT estesa oltre il minuto 20 sotto forte pressione live.
+# Tenere spenta finche' l'analisi shadow (analyze_shadow_signals.py) non conferma WR >= 60%.
+HT_PRESSURE_WINDOW_ENABLED = get_setting("HT_PRESSURE_WINDOW_ENABLED", "0").lower() in {"1", "true", "yes"}
+HT_PRESSURE_WINDOW_MAX_MINUTE = int(get_setting("HT_PRESSURE_WINDOW_MAX_MINUTE", "28") or "28")
 VIP_PRICE_XTR = int(get_setting("VIP_PRICE_XTR", "499") or "499")
 VIP_DURATION_DAYS = int(get_setting("VIP_DURATION_DAYS", "30") or "30")
 FREE_DELAY_SECONDS = int(get_setting("FREE_DELAY_SECONDS", "180") or "180")

@@ -51,15 +51,24 @@ Progetto Python per analisi storica, training di un modello semplice, invio di s
 
 - `FILTRO TOP 10`: solo Spagna, Italia, Olanda, Francia, Germania, Inghilterra, Belgio, Polonia, Portogallo e Turchia.
 - `FILTRO SERIE A/B`: solo prime e seconde divisioni dei 10 paesi sopra.
-- `FILTRO GLOBAL U23`: campionati globali, includendo anche le competizioni U23 e inferiori.
+- `FILTRO GLOBAL U23`: campionati globali, includendo anche le competizioni U23 e inferiori. **Default** per massimizzare il volume segnali (obiettivo 10+/giorno); la qualita' per lega e' protetta dai circuit breaker per-lega.
 - `FILTRO ATTUALE`: mostra il preset attivo.
+
+Nota: il filtro attivo viene persistito in `web_stats.json`; su installazioni gia' avviate va cambiato dal bot (`MENU FILTRI`), il default vale solo al primo avvio.
 
 ## Market bot
 
-- `MARKET O0.5 HT`: segnali solo `OVER 0.5 HT`.
-- `MARKET O1.5 HT`: segnali solo `OVER 1.5 HT`.
-- `MARKET BOTH HT`: monitora entrambi i market in parallelo sulla stessa partita.
+- `MARKET O0.5 HT`: segnali solo `OVER 0.5 HT` (finestra 0-0 entro il 20'; estendibile al 21-28' sotto pressione con `HT_PRESSURE_WINDOW_ENABLED=1`, da attivare solo dopo verifica con `analyze_shadow_signals.py`).
+- `MARKET O1.5 HT`: segnali solo `OVER 1.5 HT` (di fatto disabilitato: WR storico 28.3%).
+- `MARKET BOTH HT`: monitora entrambi i market HT in parallelo sulla stessa partita.
+- `MARKET NEXT GOAL` / `MARKET HT + NEXT`: aggiunge `NEXT GOAL LIVE`, ristretto alle finestre storicamente profittevoli (minuto 1-11 libero, 12-19 solo score favorevoli o parita', 20-44 solo score con WR ben sopra il breakeven, 45+ bloccato). **Default: HT + NEXT.**
 - `MARKET ATTUALE`: mostra la modalita market attiva.
+
+Le quote per market usate per P/L e ROI sono configurabili: `QUOTA_O05_HT`, `QUOTA_O15_HT`, `QUOTA_NEXT_GOAL` (fallback `QUOTA`).
+
+### Analisi shadow
+
+`analyze_shadow_signals.py` legge `live_training_data.csv` (segnali reali + shadow LEARNING) e stampa WR per market/tier/fascia minuto con verdetto contro il breakeven della quota di ogni market. Serve a decidere con i dati se aprire la finestra HT estesa (`HT_PRESSURE_WINDOW_ENABLED`) e a verificare le finestre NEXT GOAL.
 
 ## VIP monetization
 
