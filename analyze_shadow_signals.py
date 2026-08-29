@@ -119,6 +119,31 @@ def main() -> int:
         print(">>> WR sotto il breakeven: lascia HT_PRESSURE_WINDOW_ENABLED=0.")
     print()
 
+    print("=== ROI con QUOTE REALI (colonna OpenOdd) ===")
+    if "OpenOdd" not in settled.columns:
+        print("  colonna OpenOdd assente: aggiorna il bot e raccogli nuovi segnali.\n")
+    else:
+        with_odds = settled.copy()
+        with_odds["OpenOdd"] = pd.to_numeric(with_odds["OpenOdd"], errors="coerce")
+        with_odds = with_odds[with_odds["OpenOdd"] > 1.0]
+        if with_odds.empty:
+            print("  nessun segnale ancora chiuso con quota reale registrata.")
+            print("  Finche' e' vuoto, ogni ROI qui sopra resta un'ipotesi sulla quota di config.\n")
+        else:
+            for market_name, part in with_odds.groupby("Market"):
+                wins = part[part["Outcome"] == "WIN"]
+                total = len(part)
+                # Stake 1 unita' per segnale: ritorno = somma delle quote vincenti - numero segnali.
+                pnl = float(wins["OpenOdd"].sum()) - total
+                wr = len(wins) / total
+                avg_odd = float(part["OpenOdd"].mean())
+                be = breakeven_wr(avg_odd)
+                print(
+                    f"  {market_name}: n={total} | WR {wr * 100:.1f}% | quota media reale {avg_odd:.2f} "
+                    f"(breakeven {be * 100:.1f}%) | ROI {pnl / total * 100:+.1f}%"
+                )
+            print()
+
     print("=== NEXT GOAL: WR per finestra minuto (verifica filtro contestuale) ===")
     ng = settled[settled["Market"] == "NEXT GOAL LIVE"]
     if ng.empty:

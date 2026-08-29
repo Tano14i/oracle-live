@@ -62,7 +62,11 @@ def ensure_output() -> pd.DataFrame:
     for col in LIVE_TRAINING_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    return df[LIVE_TRAINING_COLUMNS]
+    # Il bot aggiunge colonne che questa lista non conosce (OpenOdd, statistiche
+    # live, TitanPressureScore): riordinare solo sulla lista locale le
+    # cancellerebbe dal file al primo salvataggio.
+    extra_columns = [col for col in df.columns if col not in LIVE_TRAINING_COLUMNS]
+    return df[LIVE_TRAINING_COLUMNS + extra_columns]
 
 
 def parse_prob(value) -> float:

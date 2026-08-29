@@ -64,11 +64,25 @@ Nota: il filtro attivo viene persistito in `web_stats.json`; su installazioni gi
 - `MARKET NEXT GOAL` / `MARKET HT + NEXT`: aggiunge `NEXT GOAL LIVE`, ristretto alle finestre storicamente profittevoli (minuto 1-11 libero, 12-19 solo score favorevoli o parita', 20-44 solo score con WR ben sopra il breakeven, 45+ bloccato). **Default: HT + NEXT.**
 - `MARKET ATTUALE`: mostra la modalita market attiva.
 
-Le quote per market usate per P/L e ROI sono configurabili: `QUOTA_O05_HT`, `QUOTA_O15_HT`, `QUOTA_NEXT_GOAL` (fallback `QUOTA`).
+Le quote per market usate per P/L e ROI sono configurabili: `QUOTA_O05_HT`, `QUOTA_O15_HT`, `QUOTA_NEXT_GOAL` (fallback `QUOTA`). **Sono solo un fallback**: quando il book espone la quota live, il P/L viene calcolato su quella (vedi sotto).
+
+### Quote reali (`OpenOdd`)
+
+Ogni segnale, reale o shadow, registra in `live_training_data.csv` la colonna `OpenOdd`: la quota effettivamente disponibile al momento dell'apertura. Per NEXT GOAL viene letta la linea `Over (gol correnti + 0.5)`, che e' l'esito su cui il segnale viene poi chiuso; se la linea non e' esposta il bot logga `LIVE_ODDS_NO_LINE` con gli esiti disponibili e lascia il campo vuoto.
+
+`chiudi_scommessa` usa `OpenOdd` per il P/L quando e' valorizzata, e ricade sulla quota di config solo se manca. Senza questo dato ogni ROI del bot resta un'ipotesi: una strategia al 67% di win rate va in pari solo da quota 1.49 in su, e va verificato che il book la paghi davvero.
 
 ### Analisi shadow
 
 `analyze_shadow_signals.py` legge `live_training_data.csv` (segnali reali + shadow LEARNING) e stampa WR per market/tier/fascia minuto con verdetto contro il breakeven della quota di ogni market. Serve a decidere con i dati se aprire la finestra HT estesa (`HT_PRESSURE_WINDOW_ENABLED`) e a verificare le finestre NEXT GOAL.
+
+La sezione `ROI con QUOTE REALI` usa la colonna `OpenOdd` invece della quota di config: e' l'unico blocco dell'output che misura la redditivita' vera. Finche' resta vuoto, servono altri giorni di raccolta.
+
+### Come vengono selezionati i segnali
+
+L'ordine dei filtri e': finestra strutturale (market, minuto, score) -> profilo storico delle squadre (pace) -> modello come conferma. La probabilita' del modello **non** e' un cancello primario: presa da sola e' anticorrelata con l'esito, perche' assegna valori alti alle situazioni di pressione a fine partita, che sono quelle con meno tempo residuo. Dentro una finestra di minuto sana torna invece a discriminare, ed e' li' che viene applicata.
+
+I candidati sotto la soglia del modello non vengono piu' scartati: restano registrati come shadow `LEARNING` (evento `V2_THRESHOLD_SHADOW`) senza essere pubblicati, cosi' la soglia stessa resta misurabile.
 
 ## VIP monetization
 

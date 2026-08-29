@@ -102,6 +102,7 @@ LIVE_TRAINING_COLUMNS = [
     "TotalGoalsAtOpen",
     "DNA",
     "Prob",
+    "OpenOdd",
     "Tier",
     "Reason",
     "AvgTotalGoals",
@@ -3622,8 +3623,16 @@ def fetch_fixture_stats(fixture_id: int, headers: dict):
         print(f"Fetch fixture stats failed for {fixture_id}: {exc}")
         return None
 
-def fetch_next_goal_live_odds(fixture_id: int, headers: dict):
-    cache_key = "ng_odds_" + str(fixture_id)
+def fetch_next_goal_live_odds(fixture_id: int, headers: dict, total_goals: int = 0):
+    """Quota live per l'esito realmente giocato dal segnale NEXT GOAL.
+
+    Il segnale viene chiuso WIN se arriva almeno un altro gol prima del fischio
+    finale, quindi la linea corrispondente e' Over (gol correnti + 0.5).
+    Mediare tutti gli esiti del mercato, come faceva la versione precedente,
+    mescolava Over e Under e restituiva un numero senza significato.
+    """
+    target_line = float(total_goals) + 0.5
+    cache_key = "ng_odds_" + str(fixture_id) + "_" + str(target_line)
     now_ts = time.time()
     cached = fixture_stats_cache.get(cache_key)
     if isinstance(cached, dict) and now_ts - float(cached.get("ts", 0.0)) < 60:
@@ -3640,21 +3649,39 @@ def fetch_next_goal_live_odds(fixture_id: int, headers: dict):
         if not items:
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}
             return None
-        odds_values = []
+        matching_odds = []
+        seen_labels = set()
         for item in items:
             for bm in item.get("bookmakers", []):
                 for bet in bm.get("bets", []):
                     for v in bet.get("values", []):
+                        label = str(v.get("value", "")).strip()
+                        seen_labels.add(label)
+                        normalized = label.lower().replace(" ", "")
+                        if not normalized.startswith("over"):
+                            continue
+                        try:
+                            line = float(normalized[4:])
+                        except ValueError:
+                            continue
+                        if abs(line - target_line) > 0.01:
+                            continue
                         try:
                             ov = float(v.get("odd", 0))
-                            if ov > 1.0:
-                                odds_values.append(ov)
-                        except Exception:
-                            pass
-        if not odds_values:
+                        except (TypeError, ValueError):
+                            continue
+                        if ov > 1.0:
+                            matching_odds.append(ov)
+        if not matching_odds:
+            log_event(
+                "LIVE_ODDS_NO_LINE",
+                "fid=" + str(fixture_id) + " target=Over " + str(target_line)
+                + " available=" + ",".join(sorted(seen_labels)[:12]),
+            )
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}
             return None
-        avg_odd = round(sum(odds_values) / len(odds_values), 2)
+        # Media tra bookmaker sulla stessa linea: qui l'aggregazione ha senso.
+        avg_odd = round(sum(matching_odds) / len(matching_odds), 2)
         fixture_stats_cache[cache_key] = {"ts": now_ts, "data": avg_odd}
         return avg_odd
     except Exception as exc:
@@ -3889,7 +3916,15 @@ def chiudi_scommessa(signal_key: str, vinta: bool, score_finale: str) -> None:
 
         shadow_only = bool(info.get("shadow_only", False))
         tier = info["tier"]
+        # P/L calcolato sulla quota realmente esposta dal book all'apertura.
+        # La quota di config resta solo come fallback quando l'odd non era disponibile.
         market_quota = get_market_quota(info.get("market", ""))
+        try:
+            open_odd = float(info.get("open_odd") or 0.0)
+        except (TypeError, ValueError):
+            open_odd = 0.0
+        if open_odd > 1.0:
+            market_quota = open_odd
         cambio = STAKE * (market_quota - 1) if vinta else -STAKE
         outcome = "WIN" if vinta else "LOSS"
 
@@ -4395,11 +4430,10 @@ def radar_loop() -> None:
                             ht_threshold_bonus = -0.02
                             log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " xgr=" + str(xgr) + " b=-0.02")
                     effective_threshold = oracle_v2_threshold + (xg_threshold_bonus if market == MARKET_NEXT_GOAL else ht_threshold_bonus)
-                    if market_in_window and prob < effective_threshold:
-                        scan_debug["candidate_failed"] += 1
+                    below_threshold = bool(market_in_window and prob < effective_threshold)
+                    if below_threshold:
                         clear_pending_signal_tracker(signal_key)
-                        log_event("V2_THRESHOLD_SKIP", "fid=" + str(fixture_id) + " mkt=" + str(market) + " prob=" + str(round(prob,3)) + " thr=" + str(round(effective_threshold,2)))
-                        continue
+                        log_event("V2_THRESHOLD_SHADOW", "fid=" + str(fixture_id) + " mkt=" + str(market) + " prob=" + str(round(prob,3)) + " thr=" + str(round(effective_threshold,2)))
                     if not market_in_window:
                         clear_pending_signal_tracker(signal_key)
                         assessment = evaluate_prewindow_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
@@ -4408,6 +4442,16 @@ def radar_loop() -> None:
                             continue
                         shadow_only = True
                         log_event("PREWINDOW_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} prob={prob:.2f} avg_ht={combined_metrics['avg_ht_goals']:.2f} avg_total={combined_metrics['avg_total_goals']:.2f} home_ht={combined_metrics['home_avg_ht_goals']:.2f} away_ht={combined_metrics['away_avg_ht_goals']:.2f}")
+                    elif below_threshold:
+                        # Il modello sotto soglia esclude la pubblicazione, non la raccolta:
+                        # prima questi candidati venivano scartati e il dato andava perso.
+                        assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                        if not assessment:
+                            assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                        if not assessment:
+                            scan_debug["candidate_failed"] += 1
+                            continue
+                        shadow_only = True
                     else:
                         shadow_only = False
                         assessment = evaluate_signal_candidate(market, minute_value, total_goals, prob, combined_metrics)
@@ -4441,9 +4485,13 @@ def radar_loop() -> None:
                                     log_event("NG_XG_SKIP", "fid=" + str(fixture_id) + " min=" + str(minute_value) + " xgr=" + str(xg_rate))
                                     continue
                                 pending_cycles = register_pending_signal_tracker(signal_key, minute_value, total_goals, prob)
-                                assessment = evaluate_pending_next_goal_candidate(minute_value, total_goals, prob, combined_metrics, pending_cycles, titan_pressure_prob, titan_soft)
-                                if assessment:
-                                    log_event("SIGNAL_PENDING_PROMOTED", f"fixture_id={fixture_id} market={market} cycles={pending_cycles} tier={assessment['tier']} prob={prob:.2f}")
+                                if not assessment:
+                                    # La persistenza integra il tiering base invece di sostituirlo:
+                                    # l'assegnazione incondizionata scartava sempre il risultato di
+                                    # evaluate_signal_candidate e nessun NEXT GOAL usciva senza 3+ cicli.
+                                    assessment = evaluate_pending_next_goal_candidate(minute_value, total_goals, prob, combined_metrics, pending_cycles, titan_pressure_prob, titan_soft)
+                                    if assessment:
+                                        log_event("SIGNAL_PENDING_PROMOTED", f"fixture_id={fixture_id} market={market} cycles={pending_cycles} tier={assessment['tier']} prob={prob:.2f}")
                             if not assessment:
                                 assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
                             if not assessment:
@@ -4456,6 +4504,12 @@ def radar_loop() -> None:
                     tier = assessment["tier"]
                     reason = assessment["reason"]
                     minute_bucket = get_minute_bucket(minute_value)
+
+                    # Quota reale all'apertura, recuperata anche per gli shadow: senza di essa
+                    # ogni ROI resta un'ipotesi basata sulla quota fissa di config.
+                    live_odd = None
+                    if market == MARKET_NEXT_GOAL:
+                        live_odd = fetch_next_goal_live_odds(fixture_id, headers, total_goals)
 
                     if not shadow_only:
                         skip_signal, skip_reason = should_skip_by_live_performance(market, league_name, minute_bucket)
@@ -4500,9 +4554,6 @@ def radar_loop() -> None:
                         increment_breakdown_counter("signals_by_market", market)
                         increment_breakdown_counter("signals_by_league", league_name)
                         increment_breakdown_counter("signals_by_minute_bucket", minute_bucket)
-                        live_odd = None
-                        if market == MARKET_NEXT_GOAL:
-                            live_odd = fetch_next_goal_live_odds(fixture_id, headers)
                         full_msg = format_signal_message(tier, country, match_up, dna, prob, minute_value, score, market, reason, live_odd=live_odd)
                         free_msg = format_free_teaser_message(tier, country, match_up, minute_value, score, market)
                         is_private_premium, private_premium_reason = is_premium_private_signal(
@@ -4558,6 +4609,7 @@ def radar_loop() -> None:
                             "delivery_targets": deliveries,
                             "shadow_only": shadow_only,
                             "total_goals_at_open": total_goals,
+                            "open_odd": live_odd,
                         }
                     append_live_training_row({
                         "SignalKey": signal_key,
@@ -4574,6 +4626,7 @@ def radar_loop() -> None:
                         "TotalGoalsAtOpen": total_goals,
                         "DNA": dna,
                         "Prob": round(prob, 4),
+                        "OpenOdd": live_odd if live_odd is not None else "",
                         "Tier": tier,
                         "Reason": reason,
                         "AvgTotalGoals": combined_metrics["avg_total_goals"],
