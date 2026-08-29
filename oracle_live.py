@@ -36,12 +36,17 @@ from config import (
     CSV_PATH,
     FREE_DELAY_SECONDS,
     FREE_EVERY_N_APPROVED,
+    HT_PRESSURE_WINDOW_ENABLED,
+    HT_PRESSURE_WINDOW_MAX_MINUTE,
     LOG_FILE_PATH,
     LIVE_TRAINING_DATA_PATH,
     MEMBERS_DB_PATH,
     MISSING_TEAMS_QUEUE_PATH,
     MODEL_PATH,
     QUOTA,
+    QUOTA_NEXT_GOAL,
+    QUOTA_O05_HT,
+    QUOTA_O15_HT,
     PERFORMANCE_STAKE_EXAMPLE,
     PERFORMANCE_STARTING_BANKROLL,
     REPORT_EVERY_N_SETTLED,
@@ -243,7 +248,17 @@ MARKET_PRESETS = {
     "NEXT_GOAL": {"label": MARKET_NEXT_GOAL, "markets": [MARKET_NEXT_GOAL]},
     "HT_NEXT": {"label": "HT + NEXT GOAL LIVE", "markets": [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]},
 }
-DEFAULT_MARKET_MODE = "HT_BOTH"
+DEFAULT_MARKET_MODE = "HT_NEXT"
+
+MARKET_QUOTAS = {
+    MARKET_OVER05_HT: QUOTA_O05_HT,
+    MARKET_OVER15_HT: QUOTA_O15_HT,
+    MARKET_NEXT_GOAL: QUOTA_NEXT_GOAL,
+}
+
+
+def get_market_quota(market: str) -> float:
+    return MARKET_QUOTAS.get(market, QUOTA)
 
 TOP10_COUNTRIES = {
     "SPAIN",
@@ -263,7 +278,7 @@ FILTER_PRESETS = {
     "SERIE_AB": {"label": "Serie A/B Top 10", "top10_only": True, "ab_only": True, "allow_youth": False},
     "GLOBAL_U23": {"label": "Global ALL-IN", "top10_only": False, "ab_only": False, "allow_youth": True},
 }
-DEFAULT_FILTER_MODE = "TOP10"
+DEFAULT_FILTER_MODE = "GLOBAL_U23"
 COVERAGE_GUARD_ENABLED = False
 COVERAGE_GUARD_THRESHOLD = 14
 COVERAGE_GUARD_HOURS = 1
@@ -526,19 +541,21 @@ def should_skip_by_live_performance(market: str, league_name: str, minute_bucket
     ensure_daily_analytics()
     analytics = stats["daily_analytics"]
 
+    # Soglie minime alzate (5->8, 4->6): con 10+ segnali/giorno un campione di 4-5
+    # esiti e' rumore statistico e spegneva il market per il resto della giornata.
     market_stats = get_settled_bucket_stats(analytics.get("settled_by_market"), market)
     market_total = market_stats["WIN"] + market_stats["LOSS"]
-    if market_total >= 5 and market_stats["WIN"] / max(1, market_total) < 0.40:
+    if market_total >= 8 and market_stats["WIN"] / max(1, market_total) < 0.40:
         return True, f"market {market} under 40% today"
 
     league_stats = get_settled_bucket_stats(analytics.get("settled_by_league"), league_name)
     league_total = league_stats["WIN"] + league_stats["LOSS"]
-    if league_total >= 4 and league_stats["WIN"] / max(1, league_total) < 0.35:
+    if league_total >= 6 and league_stats["WIN"] / max(1, league_total) < 0.35:
         return True, f"league {league_name} cold today"
 
     minute_stats = get_settled_bucket_stats(analytics.get("settled_by_minute_bucket"), minute_bucket)
     minute_total = minute_stats["WIN"] + minute_stats["LOSS"]
-    if minute_total >= 4 and minute_stats["WIN"] / max(1, minute_total) < 0.35:
+    if minute_total >= 6 and minute_stats["WIN"] / max(1, minute_total) < 0.35:
         return True, f"minute zone {minute_bucket} cold today"
 
     market_last_20 = get_rolling_bucket_stats("market", market, 20)
@@ -602,6 +619,8 @@ def format_market_rolling_overview() -> str:
         parts.append(f"{market_name}: {summarize_wr_bucket(get_rolling_bucket_stats('market', market_name, 20))}")
     return " | ".join(parts) if parts else "n/a"
 def get_minute_bucket(minute_value: int) -> str:
+    if minute_value <= 14:
+        return "1-14"
     if minute_value <= 20:
         return "15-20"
     if minute_value <= 25:
@@ -2459,7 +2478,7 @@ def compute_performance_snapshot() -> dict:
                     wins = int((df_market["Outcome"] == "WIN").sum())
                     losses = int((df_market["Outcome"] == "LOSS").sum())
                     market_settled = wins + losses
-                    market_profit = ((wins * (QUOTA - 1)) - losses) * tracked_stake if tracked_stake else 0.0
+                    market_profit = ((wins * (get_market_quota(market_name) - 1)) - losses) * tracked_stake if tracked_stake else 0.0
                     market_roi = (market_profit / (market_settled * tracked_stake) * 100) if market_settled and tracked_stake else 0.0
                     by_market.append({
                         "market": market_name,
@@ -3760,62 +3779,33 @@ def should_skip_next_goal_by_context(minute_value: int, total_goals: int, score:
         home_goals = 0
         away_goals = 0
 
-    diff = abs(home_goals - away_goals)
-
-    # Score killer assoluti - blocca sempre indipendentemente dal minuto
-    # 1-2 (22%), 2-1 reversed -> no, 3-2 (5%), 2-2 (19%), 2-5 (18%)
-    killer_scores = {(1, 2), (2, 1) if False else None, (3, 2), (2, 3) if False else None, (2, 2), (2, 5), (5, 2)}
-    # Correggo: blocco asimmetrico basato su chi perde
-    # Score dove la squadra che insegue ha bisogno di 2+ gol = killer
-    if (home_goals == 1 and away_goals == 2) or (home_goals == 2 and away_goals == 1 and False):
-        # 1-2: WR 22% -> blocca sempre
+    # Score killer assoluti - blocca sempre indipendentemente dal minuto (WR < 25%)
+    if home_goals == 1 and away_goals == 2:
         return True, f"next_goal killer score {score} WR=22%"
-    if (home_goals == 3 and away_goals == 2) or (home_goals == 2 and away_goals == 3 and False):
-        # 3-2: WR 5% -> blocca sempre
+    if home_goals == 3 and away_goals == 2:
         return True, f"next_goal killer score {score} WR=5%"
     if home_goals == away_goals == 2:
-        # 2-2: WR 19% -> blocca sempre
         return True, f"next_goal killer score {score} WR=19%"
 
-    # Score favorevoli - lascia passare anche in finestre difficili
-    # 2-3 (83%), 1-4 (60%), 2-1 (55%), 4-0 (52%), 0-2 (48%)
-    favorable = (
-        (home_goals == 2 and away_goals == 3) or
-        (home_goals == 3 and away_goals == 2 and False) or
-        (home_goals == 1 and away_goals == 4) or
-        (home_goals == 4 and away_goals == 1) or
-        (home_goals == 2 and away_goals == 1) or
-        (home_goals == 1 and away_goals == 2 and False) or
-        (home_goals == 4 and away_goals == 0) or
-        (home_goals == 0 and away_goals == 4)
-    )
+    # Score favorevoli (WR > 55% storico) raggiungibili sotto i 4 gol totali: 2-1 (55%)
+    # (2-3, 1-4, 4-1 hanno >=5 gol e sono gia' bloccati dal check total_goals>=4)
+    favorable = home_goals == 2 and away_goals == 1
 
-    # Finestre temporali con logica per score
     if 1 <= minute_value <= 11:
         # WR 53-60% -> ok per tutti gli score non killer
         return False, ""
 
     if 12 <= minute_value <= 19:
-        # WR 46-53% -> solo score favorevoli o parità 0-0/1-1
+        # WR 46-53% -> solo score favorevoli o parita' 0-0/1-1
         if favorable:
             return False, ""
         if home_goals == away_goals <= 1:
             return False, ""
         return True, f"next_goal minute {minute_value} score {score} WR<50% non favorevole"
 
-    if 20 <= minute_value <= 44:
-        # WR 38-49% -> solo score molto favorevoli
-        if favorable:
-            return False, ""
-        return True, f"next_goal minute {minute_value} score {score} WR<49% zona grigia"
-
-    if 45 <= minute_value <= 69:
-        # WR 32-42% -> solo score eccezionalmente favorevoli (diff >= 2 con squadra sotto che insegue)
-        if (home_goals == 2 and away_goals == 3) or (home_goals == 4 and away_goals == 1) or (home_goals == 1 and away_goals == 4):
-            return False, ""
-        return True, f"next_goal minute {minute_value} secondo tempo non favorevole WR<42%"
-
-    return False, ""
+    # 20+: WR 38-49% al 20-44 e 32-42% dopo, tutti sotto il breakeven (57.1% a quota 1.75):
+    # gli unici score storicamente sopra soglia richiedono 5+ gol e sono gia' bloccati
+    return True, f"next_goal minute {minute_value} score {score} WR sotto breakeven"
 
 
 def should_skip_by_live_stats(fixture_id: int, market: str, minute_value: int, total_goals: int, headers: dict, stats_payload=None):
@@ -3899,7 +3889,8 @@ def chiudi_scommessa(signal_key: str, vinta: bool, score_finale: str) -> None:
 
         shadow_only = bool(info.get("shadow_only", False))
         tier = info["tier"]
-        cambio = (STAKE * QUOTA - STAKE) if vinta else -STAKE
+        market_quota = get_market_quota(info.get("market", ""))
+        cambio = STAKE * (market_quota - 1) if vinta else -STAKE
         outcome = "WIN" if vinta else "LOSS"
 
         if not shadow_only:
@@ -4331,7 +4322,6 @@ def radar_loop() -> None:
                 red_cards_at_open = float(stats_payload.get("red_cards", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 dna = combined_metrics["avg_total_goals"]
                 model_feature_columns = list(getattr(oracle_brain, "feature_names_in_", TRAINER_FEATURE_COLUMNS))
-                xg_threshold_bonus = 0.0
 
                 for market in prioritized_markets:
                     signal_key = get_signal_key(fixture_id, market)
@@ -4364,7 +4354,33 @@ def radar_loop() -> None:
                     x_input = pd.DataFrame([[model_feature_values.get(column, 0.0) for column in model_feature_columns]], columns=model_feature_columns)
                     prob = oracle_brain.predict_proba(x_input)[0][1]
                     market_in_window = is_market_window(market, minute_value, total_goals)
+                    if (
+                        not market_in_window
+                        and HT_PRESSURE_WINDOW_ENABLED
+                        and market == MARKET_OVER05_HT
+                        and total_goals == 0
+                        and 20 < minute_value <= HT_PRESSURE_WINDOW_MAX_MINUTE
+                        and isinstance(stats_payload, dict)
+                    ):
+                        # Finestra estesa oltre il 20': solo con pressione live forte,
+                        # da attivare dopo conferma dei dati shadow (analyze_shadow_signals.py)
+                        ext_sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
+                        ext_gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
+                        if ext_sib >= 4 and ext_gks >= 2:
+                            market_in_window = True
+                            log_event("HT_PRESSURE_WINDOW", f"fid={fixture_id} min={minute_value} sib={ext_sib} gks={ext_gks}")
                     ht_threshold_bonus = 0.0
+                    xg_threshold_bonus = 0.0
+                    xg_rate = get_xg_rate(stats_payload, minute_value)
+                    if market == MARKET_NEXT_GOAL:
+                        # Bonus soglia xG calcolato PRIMA del check soglia (prima veniva
+                        # assegnato dopo lo skip, quindi non aveva mai effetto)
+                        if xg_rate >= 0.030:
+                            xg_threshold_bonus = -0.05
+                            log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.05")
+                        elif xg_rate >= 0.025:
+                            xg_threshold_bonus = -0.03
+                            log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.03")
                     if market == MARKET_OVER05_HT and isinstance(stats_payload, dict):
                         sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
                         gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
@@ -4419,18 +4435,11 @@ def radar_loop() -> None:
                                     clear_pending_signal_tracker(signal_key)
                                     log_event("NG_CONTEXT_SKIP", f"fixture_id={fixture_id} minute={minute_value} score={score} reason={ng_reason}")
                                     continue
-                                xg_rate = get_xg_rate(stats_payload, minute_value)
                                 if xg_rate > 0.0 and xg_rate < 0.010 and minute_value >= 15:
                                     scan_debug["candidate_failed"] += 1
                                     clear_pending_signal_tracker(signal_key)
                                     log_event("NG_XG_SKIP", "fid=" + str(fixture_id) + " min=" + str(minute_value) + " xgr=" + str(xg_rate))
                                     continue
-                                if xg_rate >= 0.030:
-                                    xg_threshold_bonus = -0.05
-                                    log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.05")
-                                elif xg_rate >= 0.025:
-                                    xg_threshold_bonus = -0.03
-                                    log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.03")
                                 pending_cycles = register_pending_signal_tracker(signal_key, minute_value, total_goals, prob)
                                 assessment = evaluate_pending_next_goal_candidate(minute_value, total_goals, prob, combined_metrics, pending_cycles, titan_pressure_prob, titan_soft)
                                 if assessment:
