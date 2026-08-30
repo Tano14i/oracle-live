@@ -47,6 +47,10 @@ from config import (
     QUOTA_NEXT_GOAL,
     QUOTA_O05_HT,
     QUOTA_O15_HT,
+    MIN_ODD_NEXT_GOAL,
+    MIN_ODD_O05_HT,
+    MIN_ODD_O15_HT,
+    ODDS_GATE_STRICT,
     PERFORMANCE_STAKE_EXAMPLE,
     PERFORMANCE_STARTING_BANKROLL,
     REPORT_EVERY_N_SETTLED,
@@ -62,6 +66,7 @@ from config import (
     VIP_SUPPORT_CONTACT,
     WEB_DATA_PATH,
 )
+import oracle_ai
 from vip_membership import VipMembershipStore
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 from oracle_prematch.bot_service import collect_prematch_snapshots, run_prematch_bot_scan
@@ -140,6 +145,13 @@ TITAN_PRESSURE_FEATURE_COLUMNS = [
     "RedCardsHome",
     "RedCardsAway",
 ]
+# Partite di storico usate per il ritmo di una squadra.
+# Misurato su 53.698 partite con HT reale (football-data.co.uk): la correlazione
+# con i gol del primo tempo cresce da 0.071 a finestra 12 fino a 0.107 a 50.
+# I gol di primo tempo sono rari e rumorosi, quindi servono piu' osservazioni:
+# tail() prende comunque quello che c'e', il minimo di 6 partite resta.
+TEAM_HISTORY_WINDOW = 50
+
 TITAN_PROMOTION_THRESHOLD = 0.64
 TITAN_PRESSURE_ALERT_THRESHOLD = 0.70
 missing_settings = [name for name, value in required_settings.items() if not value]
@@ -261,6 +273,41 @@ MARKET_QUOTAS = {
 def get_market_quota(market: str) -> float:
     return MARKET_QUOTAS.get(market, QUOTA)
 
+
+# Quota live minima perche' un segnale sia giocabile.
+MARKET_MIN_ODDS = {
+    MARKET_OVER05_HT: MIN_ODD_O05_HT,
+    MARKET_OVER15_HT: MIN_ODD_O15_HT,
+    MARKET_NEXT_GOAL: MIN_ODD_NEXT_GOAL,
+}
+
+
+def get_min_live_odd(market: str) -> float:
+    return MARKET_MIN_ODDS.get(market, 0.0)
+
+
+def should_skip_by_odds(market: str, live_odd) -> tuple:
+    """Scarta i segnali che il mercato non paga abbastanza da coprire il breakeven.
+
+    Prima la quota minima era solo una riga di avviso nel messaggio e il segnale
+    partiva comunque: NEXT GOAL veniva pubblicato a 1.09 contro un breakeven del
+    91.7%, cioe' era vinto sul campo ma ingiocabile in cassa.
+    """
+    minimum = get_min_live_odd(market)
+    if minimum <= 0:
+        return False, ""
+    if live_odd is None:
+        if ODDS_GATE_STRICT:
+            return True, f"quota non disponibile (gate strict) min {minimum:.2f}"
+        return False, ""
+    try:
+        odd_value = float(live_odd)
+    except (TypeError, ValueError):
+        return False, ""
+    if odd_value < minimum:
+        return True, f"quota {odd_value:.2f} sotto il minimo {minimum:.2f}"
+    return False, ""
+
 TOP10_COUNTRIES = {
     "SPAIN",
     "ITALY",
@@ -322,9 +369,24 @@ SERIE_AB_PATTERNS = {
     "PORTUGAL": ["primeira liga", "liga portugal", "liga portugal 2", "segunda liga"],
     "TURKEY": ["super lig", "1 lig", "tff 1 lig"],
 }
+_TOKEN_URL_RE = re.compile(r"/bot\d+:[A-Za-z0-9_\-]+")
+
+
+def redact_secrets(message) -> str:
+    """Toglie il token Telegram dai messaggi di log.
+
+    Gli errori di polling contengono l'URL completo della chiamata, token
+    incluso: finiva in chiaro nel file di log migliaia di volte.
+    """
+    text = str(message)
+    if TOKEN_LIVE:
+        text = text.replace(TOKEN_LIVE, "<TOKEN>")
+    return _TOKEN_URL_RE.sub("/bot<TOKEN>", text)
+
+
 def log_event(event: str, message: str) -> None:
     try:
-        logger.info(f"{event} | {message}")
+        logger.info(f"{event} | {redact_secrets(message)}")
     except Exception:
         pass
 
@@ -708,89 +770,63 @@ def extract_requested_date(message_text: str) -> str | None:
         return None
 
 
-def format_prematch_reason(outcome) -> str:
-    metrics = outcome.metrics or {}
-    timing = metrics.get("hours_to_kickoff")
-    timing_label = "kickoff soon"
-    if isinstance(timing, (int, float)):
-        if timing > 0:
-            timing_label = f"kickoff in {timing:.1f}h"
-        else:
-            timing_label = "kickoff very close"
-    parts = [
-        f"drop {outcome.largest_drop_pct:.1f}% on {outcome.leading_market}",
-        f"fastest step {metrics.get('biggest_step_drop_pct', 0.0):.1f}%",
-        f"bookmakers avg {outcome.bookmaker_count_avg:.1f}",
-        timing_label,
-    ]
-    context_flags = [flag for flag in (outcome.flags or []) if flag]
-    if context_flags:
-        parts.append("context: " + ", ".join(context_flags[:4]))
-    return " | ".join(parts)
+def format_prematch_kickoff(outcome) -> str:
+    """Ora di inizio e quanto manca."""
+    try:
+        kickoff = datetime.fromisoformat(str(outcome.kickoff_utc).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "-"
+    hours = (kickoff - now_utc()).total_seconds() / 3600.0
+    label = kickoff.strftime("%H:%M")
+    if hours <= 0:
+        return f"{label} (gia' iniziata)"
+    if hours < 1:
+        return f"{label} (fra {hours * 60:.0f} min)"
+    return f"{label} (fra {hours:.1f}h)"
 
 
-def format_prematch_market_move(outcome) -> str:
-    market_label = str(outcome.leading_market or "").strip().upper()
-    drop_label = f"-{outcome.largest_drop_pct:.1f}%"
-    if market_label == "1":
-        return f"quota casa in calo ({drop_label})"
-    if market_label == "2":
-        return f"quota ospite in calo ({drop_label})"
-    if market_label == "X":
-        return f"quota pareggio in calo ({drop_label})"
-    if market_label == "O2.5":
-        return f"Over 2.5 in calo ({drop_label})"
-    if market_label == "U2.5":
-        return f"Under 2.5 in calo ({drop_label})"
-    return f"movimento su {market_label} ({drop_label})"
+def format_prematch_pace(outcome) -> str:
+    return (f"ritmo 1T {outcome.pair_ht_pace:.2f} "
+            f"(la piu' debole {outcome.worst_ht_pace:.2f}) | "
+            f"partite note {outcome.known_matches}")
 
 
 def format_prematch_action_label(outcome) -> str:
-    hours_to_kickoff = (outcome.metrics or {}).get("hours_to_kickoff")
-    if outcome.status == "WATCH LIVE":
-        return "CHECK ORA"
-    if outcome.status == "MANUAL REVIEW":
-        if isinstance(hours_to_kickoff, (int, float)):
-            if hours_to_kickoff <= 0.5:
-                return "CHECK ORA"
-            if hours_to_kickoff <= 2.0:
-                return "CHECK fra 10-15 minuti"
-        return "CHECK PIU TARDI"
-    return "NO BET per ora"
+    """Il radar non fa scommettere prematch: indica quando presidiare il live."""
+    try:
+        kickoff = datetime.fromisoformat(str(outcome.kickoff_utc).replace("Z", "+00:00"))
+        hours = (kickoff - now_utc()).total_seconds() / 3600.0
+    except (TypeError, ValueError):
+        hours = 99.0
+    if hours <= 0:
+        return "IN CORSO - controlla il live"
+    if hours <= 0.5:
+        return "PRESIDIA ORA il calcio d'inizio"
+    return "IN ATTESA - entra al minuto 1-5"
 
 
 def format_prematch_bet_type(outcome) -> str:
-    market_label = str(outcome.leading_market or "").strip().upper()
-    if market_label == "1":
-        return "1X (segnale base: 1)"
-    if market_label == "2":
-        return "X2 (segnale base: 2)"
-    if market_label == "X":
-        return "Pareggio"
-    if market_label == "O2.5":
-        return "Over 2.5 gol"
-    if market_label == "U2.5":
-        return "Under 2.5 gol"
-    return market_label or "-"
+    odd = getattr(outcome, "prematch_odd", None)
+    if odd:
+        # La quota prematch di questo mercato e' storicamente piu' corta di
+        # quella al minuto 1-5: si segnala, non si consiglia di prenderla.
+        return f"OVER 0.5 HT | quota prematch {odd:.2f} (la live e' di norma piu' lunga)"
+    return "OVER 0.5 HT | entra sulla quota live al minuto 1-5"
 
 
 def format_prematch_today_report(result) -> str:
     summary = result.summary
     header = (
-        "<b>PARTITE SOSPETTE PRE-MATCH</b>\n\n"
+        "<b>RADAR PRE-MATCH — OVER 0.5 HT</b>\n\n"
         f"<b>Data:</b> {escape_html(result.date_value)}\n"
-        f"<b>Partite analizzabili:</b> {summary.total_fixtures}\n"
-        f"<b>Partite sospette:</b> {summary.flagged_total}"
+        f"<b>Partite in programma:</b> {summary.total_fixtures}\n"
+        f"<b>Candidate:</b> {summary.flagged_total} "
+        f"({summary.approved_total} approved, {summary.caution_total} caution)"
     )
     if result.fixtures_seen == 0:
-        return header + "\n\nNessuna partita prematch trovata per questa data."
-    if summary.total_fixtures == 0:
-        return (
-            header
-            + "\n\nPrimo snapshot salvato. Richiedi di nuovo tra qualche minuto cosi posso confrontare i movimenti quota."
-        )
+        return header + "\n\nNessuna partita in programma per questa data."
     if not summary.outcomes:
-        return header + "\n\nNessuna partita sopra soglia in questo momento."
+        return header + "\n\nNessuna partita supera il filtro sul ritmo di primo tempo."
 
     blocks = [header, ""]
     for index, outcome in enumerate(summary.outcomes, start=1):
@@ -800,9 +836,10 @@ def format_prematch_today_report(result) -> str:
         blocks.append(
             f"<b>{index}. {escape_html(outcome.home_team)} vs {escape_html(outcome.away_team)}</b>\n"
             f"{location_line}\n"
-            f"Movimento mercato: {escape_html(format_prematch_market_move(outcome))}\n"
+            f"Inizio: {escape_html(format_prematch_kickoff(outcome))}\n"
+            f"Tier: <b>{escape_html(outcome.tier)}</b> | {escape_html(format_prematch_pace(outcome))}\n"
             f"Azione: <b>{escape_html(format_prematch_action_label(outcome))}</b>\n"
-            f"Tipo di bet: <b>{escape_html(format_prematch_bet_type(outcome))}</b>"
+            f"{escape_html(format_prematch_bet_type(outcome))}"
         )
         blocks.append("")
     return "\n".join(blocks).strip()
@@ -823,9 +860,10 @@ def format_prematch_watch_update(result, watched_fixture_ids: list[str]) -> str:
     for index, outcome in enumerate(watched, start=1):
         blocks.append(
             f"<b>{index}. {escape_html(outcome.home_team)} vs {escape_html(outcome.away_team)}</b>\n"
-            f"Movimento mercato: {escape_html(format_prematch_market_move(outcome))}\n"
+            f"Inizio: {escape_html(format_prematch_kickoff(outcome))}\n"
+            f"Tier: <b>{escape_html(outcome.tier)}</b> | {escape_html(format_prematch_pace(outcome))}\n"
             f"Azione: <b>{escape_html(format_prematch_action_label(outcome))}</b>\n"
-            f"Tipo di bet: <b>{escape_html(format_prematch_bet_type(outcome))}</b>"
+            f"{escape_html(format_prematch_bet_type(outcome))}"
         )
         blocks.append("")
     return "\n".join(blocks).strip()
@@ -840,12 +878,12 @@ def build_prematch_watch_snapshot(result, watched_fixture_ids: list[str]) -> dic
         snapshot[outcome.fixture_id] = {
             "fixture_id": outcome.fixture_id,
             "match": f"{outcome.home_team} vs {outcome.away_team}",
-            "market_move": format_prematch_market_move(outcome),
+            "market_move": format_prematch_pace(outcome),
             "action": format_prematch_action_label(outcome),
             "bet_type": format_prematch_bet_type(outcome),
-            "status": outcome.status,
-            "risk_score": int(outcome.risk_score),
-            "largest_drop_pct": float(outcome.largest_drop_pct),
+            "status": outcome.tier,
+            "risk_score": 0,
+            "largest_drop_pct": float(outcome.pair_ht_pace),
         }
     return snapshot
 
@@ -1650,7 +1688,7 @@ def get_team_metrics(team_name: str):
     if not team_name or df_matches is None:
         return None
 
-    storico = df_matches[(df_matches["HomeTeam"] == team_name) | (df_matches["AwayTeam"] == team_name)].tail(12)
+    storico = df_matches[(df_matches["HomeTeam"] == team_name) | (df_matches["AwayTeam"] == team_name)].tail(TEAM_HISTORY_WINDOW)
     if len(storico) < 6:
         return {
             "team": team_name,
@@ -1663,20 +1701,34 @@ def get_team_metrics(team_name: str):
     ht_goals = (storico["HTHome"].fillna(0) + storico["HTAway"].fillna(0)).astype(float)
 
     avg_total_goals = round(total_goals.mean(), 2)
-    avg_ht_goals = round(ht_goals.mean(), 2)
-
-    suspicious_ht_zero_mask = (ht_goals == 0) & (total_goals >= 2)
-    suspicious_ratio = float(suspicious_ht_zero_mask.mean()) if len(storico) else 0.0
-    positive_ht_count = int((ht_goals > 0).sum())
     ht_fallback_used = False
 
-    if avg_total_goals >= 2.2 and avg_ht_goals <= 0.35 and suspicious_ratio >= 0.6 and positive_ht_count <= 2:
-        avg_ht_goals = round(min(max(avg_total_goals * 0.38, 0.8), 1.35), 2)
-        ht_fallback_used = True
-
-    reason = "ok"
-    if ht_fallback_used:
-        reason = f"ht fallback used (suspicious_zero_ratio={suspicious_ratio:.2f})"
+    if "HTKnown" in storico.columns:
+        # Con la colonna esplicita la media si calcola solo sulle partite in cui
+        # il primo tempo e' davvero noto: uno 0-0 confermato conta, uno zero che
+        # significa "dato assente" non diluisce piu' la media verso il basso.
+        known_mask = pd.to_numeric(storico["HTKnown"], errors="coerce").fillna(0) > 0
+        known_count = int(known_mask.sum())
+        if known_count >= 6:
+            avg_ht_goals = round(float(ht_goals[known_mask].mean()), 2)
+            reason = f"ht from {known_count}/{len(storico)} known matches"
+        else:
+            avg_ht_goals = round(min(max(avg_total_goals * 0.38, 0.8), 1.35), 2)
+            ht_fallback_used = True
+            reason = f"ht fallback used (only {known_count} known matches)"
+    else:
+        # Dataset senza la colonna: si torna all'euristica, che indovina quali
+        # zeri siano dati mancanti guardando quante partite con 2+ gol
+        # risultano 0-0 all'intervallo.
+        avg_ht_goals = round(ht_goals.mean(), 2)
+        suspicious_ht_zero_mask = (ht_goals == 0) & (total_goals >= 2)
+        suspicious_ratio = float(suspicious_ht_zero_mask.mean()) if len(storico) else 0.0
+        positive_ht_count = int((ht_goals > 0).sum())
+        reason = "ok"
+        if avg_total_goals >= 2.2 and avg_ht_goals <= 0.35 and suspicious_ratio >= 0.6 and positive_ht_count <= 2:
+            avg_ht_goals = round(min(max(avg_total_goals * 0.38, 0.8), 1.35), 2)
+            ht_fallback_used = True
+            reason = f"ht fallback used (suspicious_zero_ratio={suspicious_ratio:.2f})"
 
     return {
         "team": team_name,
@@ -1685,6 +1737,9 @@ def get_team_metrics(team_name: str):
         "matches": int(len(storico)),
         "avg_total_goals": avg_total_goals,
         "avg_ht_goals": avg_ht_goals,
+        # Segnala che avg_ht_goals non e' misurato ma ricavato dal ritmo totale:
+        # sui market di primo tempo un dato inventato non deve poter aprire.
+        "ht_synthetic": ht_fallback_used,
     }
 
 def combine_team_metrics(home_metrics: dict, away_metrics: dict):
@@ -1707,6 +1762,8 @@ def combine_team_metrics(home_metrics: dict, away_metrics: dict):
     return {
         "metrics_ok": True,
         "reason": f"home={home_metrics.get('reason', 'ok')} | away={away_metrics.get('reason', 'ok')}",
+        # Basta una squadra con HT inventato per rendere inaffidabile la coppia.
+        "ht_synthetic": bool(home_metrics.get("ht_synthetic") or away_metrics.get("ht_synthetic")),
         "matches": min(home_metrics["matches"], away_metrics["matches"]),
         "home_avg_total_goals": home_metrics["avg_total_goals"],
         "away_avg_total_goals": away_metrics["avg_total_goals"],
@@ -1728,21 +1785,30 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
     if market == MARKET_OVER05_HT:
         if total_goals != 0 or not 1 <= minute_value <= 44:
             return None
-        if avg_total_goals < 2.10 or avg_ht_goals < 0.80:
+        # Un ritmo HT ricavato dal fallback non e' una misura: su questo market
+        # non deve poter aprire un segnale reale.
+        if metrics.get("ht_synthetic"):
             return None
-        if min(home_ht, away_ht) < 0.56:
+        # Soglie ricalibrate su 48.940 partite con HT reale. Win rate osservato
+        # per fascia di ritmo HT, contro un breakeven del 69% a quota 1.45:
+        #   0.7-0.9 -> 64.0% (perde)   0.9-1.1 -> 67.3% (perde)
+        #   1.1-1.3 -> 70.0%           1.3-1.6 -> 73.5%   1.6+ -> 78.4%
+        # La vecchia soglia di 0.80 accettava proprio la fascia in perdita.
+        if avg_total_goals < 2.10 or avg_ht_goals < 1.10:
             return None
-        if prob >= 0.88 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.00:
+        if min(home_ht, away_ht) < 0.80:
+            return None
+        if prob >= 0.88 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.60:
             return {
                 "tier": TIER_APPROVED,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | 0-0 with time window still strong",
             }
-        if prob >= 0.80 and avg_total_goals >= 2.20 and avg_ht_goals >= 0.86:
+        if prob >= 0.80 and avg_total_goals >= 2.20 and avg_ht_goals >= 1.30:
             return {
                 "tier": TIER_CAUTION,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | setup still tradable",
             }
-        if prob >= 0.72 and avg_total_goals >= 2.08 and avg_ht_goals >= 0.78 and min(home_ht, away_ht) >= 0.52:
+        if prob >= 0.72 and avg_total_goals >= 2.08 and avg_ht_goals >= 1.10 and min(home_ht, away_ht) >= 0.80:
             return {
                 "tier": TIER_GAMBLING,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | aggressive early HT value setup",
@@ -2023,7 +2089,9 @@ def format_signal_message(
                 confirm_line = "\U0001F504 Confermato su " + str(cycles) + " rilevamenti\n"
             elif cycles >= 2:
                 confirm_line = "\U0001F504 Rilevato su " + str(cycles) + " scansioni\n"
-    min_quota = get_min_quota_for_tier(tier)
+    # Soglia per market, non per tier: e' quella che il filtro quote applica
+    # davvero, quindi il messaggio deve mostrare la stessa.
+    min_quota = get_min_live_odd(market) or get_min_quota_for_tier(tier)
     if live_odd is not None:
         if live_odd >= min_quota:
             quota_line = "\U0001F4B0 Quota live: <b>" + str(live_odd) + "</b> \u2705 (min " + str(min_quota) + ")\n"
@@ -3623,16 +3691,40 @@ def fetch_fixture_stats(fixture_id: int, headers: dict):
         print(f"Fetch fixture stats failed for {fixture_id}: {exc}")
         return None
 
-def fetch_next_goal_live_odds(fixture_id: int, headers: dict, total_goals: int = 0):
-    """Quota live per l'esito realmente giocato dal segnale NEXT GOAL.
+# Id dei mercati sull'endpoint live di API-FOOTBALL.
+# 49 = "Over/Under (1st Half)", 25 = "Match Goals" (totale gol match).
+LIVE_ODDS_MARKET_IDS = {
+    MARKET_OVER05_HT: 49,
+    MARKET_OVER15_HT: 49,
+    MARKET_NEXT_GOAL: 25,
+}
 
-    Il segnale viene chiuso WIN se arriva almeno un altro gol prima del fischio
-    finale, quindi la linea corrispondente e' Over (gol correnti + 0.5).
-    Mediare tutti gli esiti del mercato, come faceva la versione precedente,
-    mescolava Over e Under e restituiva un numero senza significato.
+
+def get_live_odds_target(market: str, total_goals: int):
+    """Linea di mercato su cui il segnale viene effettivamente chiuso."""
+    if market == MARKET_OVER05_HT:
+        return 0.5
+    if market == MARKET_OVER15_HT:
+        return 1.5
+    if market == MARKET_NEXT_GOAL:
+        # Vince se arriva almeno un altro gol: linea Over (gol correnti + 0.5).
+        return float(total_goals) + 0.5
+    return None
+
+
+def fetch_live_market_odd(fixture_id: int, headers: dict, market: str, total_goals: int = 0):
+    """Quota live per la linea realmente giocata dal segnale.
+
+    L'endpoint live espone i mercati sotto la chiave "odds", con la linea nel
+    campo "handicap"; la struttura "bookmakers -> bets -> values" che il codice
+    cercava prima appartiene all'endpoint prematch, quindi non trovava mai nulla
+    e la quota restava sempre ignota.
     """
-    target_line = float(total_goals) + 0.5
-    cache_key = "ng_odds_" + str(fixture_id) + "_" + str(target_line)
+    market_id = LIVE_ODDS_MARKET_IDS.get(market)
+    target_line = get_live_odds_target(market, total_goals)
+    if market_id is None or target_line is None:
+        return None
+    cache_key = "odds_" + str(fixture_id) + "_" + str(market_id) + "_" + str(target_line)
     now_ts = time.time()
     cached = fixture_stats_cache.get(cache_key)
     if isinstance(cached, dict) and now_ts - float(cached.get("ts", 0.0)) < 60:
@@ -3640,47 +3732,51 @@ def fetch_next_goal_live_odds(fixture_id: int, headers: dict, total_goals: int =
     try:
         response = requests.get(
             "https://v3.football.api-sports.io/odds/live",
-            headers=headers, params={"fixture": fixture_id, "bet": 5}, timeout=10,
+            headers=headers, params={"fixture": fixture_id}, timeout=10,
         )
         if response.status_code != 200:
+            log_event("LIVE_ODDS_HTTP", "fid=" + str(fixture_id) + " status=" + str(response.status_code))
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}
             return None
         items = response.json().get("response", [])
         if not items:
+            log_event("LIVE_ODDS_EMPTY", "fid=" + str(fixture_id) + " mkt=" + str(market))
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}
             return None
         matching_odds = []
-        seen_labels = set()
+        seen_lines = set()
         for item in items:
-            for bm in item.get("bookmakers", []):
-                for bet in bm.get("bets", []):
-                    for v in bet.get("values", []):
-                        label = str(v.get("value", "")).strip()
-                        seen_labels.add(label)
-                        normalized = label.lower().replace(" ", "")
-                        if not normalized.startswith("over"):
-                            continue
-                        try:
-                            line = float(normalized[4:])
-                        except ValueError:
-                            continue
-                        if abs(line - target_line) > 0.01:
-                            continue
-                        try:
-                            ov = float(v.get("odd", 0))
-                        except (TypeError, ValueError):
-                            continue
-                        if ov > 1.0:
-                            matching_odds.append(ov)
+            for entry in item.get("odds", []):
+                if entry.get("id") != market_id:
+                    continue
+                for v in entry.get("values", []):
+                    if v.get("suspended"):
+                        continue
+                    if str(v.get("value", "")).strip().lower() != "over":
+                        continue
+                    try:
+                        line = float(v.get("handicap"))
+                    except (TypeError, ValueError):
+                        continue
+                    seen_lines.add(line)
+                    if abs(line - target_line) > 0.01:
+                        continue
+                    try:
+                        ov = float(v.get("odd", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if ov > 1.0:
+                        matching_odds.append(ov)
         if not matching_odds:
             log_event(
                 "LIVE_ODDS_NO_LINE",
-                "fid=" + str(fixture_id) + " target=Over " + str(target_line)
-                + " available=" + ",".join(sorted(seen_labels)[:12]),
+                "fid=" + str(fixture_id) + " mkt=" + str(market) + " bet=" + str(market_id)
+                + " target=Over " + str(target_line)
+                + " available=" + ",".join(str(x) for x in sorted(seen_lines)[:12]),
             )
             fixture_stats_cache[cache_key] = {"ts": now_ts, "data": None}
             return None
-        # Media tra bookmaker sulla stessa linea: qui l'aggregazione ha senso.
+        # Media tra book sulla stessa linea: qui l'aggregazione ha senso.
         avg_odd = round(sum(matching_odds) / len(matching_odds), 2)
         fixture_stats_cache[cache_key] = {"ts": now_ts, "data": avg_odd}
         return avg_odd
@@ -4174,10 +4270,14 @@ def schedule_free_delivery(signal_key: str, chat_id, message_text: str) -> None:
         pending_free_timers.pop(signal_key, None)
         with state_lock:
             info = stats["monitor_risultati"].get(signal_key)
+            # Il teaser parte con ritardo: se nel frattempo l'analisi e' pronta
+            # la include subito, senza bisogno di una modifica successiva.
+            analysis_block = (info or {}).get("ai_analysis") or ""
         if not info or info.get("status") != "pending":
             return
+        text_to_send = message_text + analysis_block
         try:
-            sent = bot.send_message(chat_id, message_text, parse_mode="HTML")
+            sent = bot.send_message(chat_id, text_to_send, parse_mode="HTML")
             increment_analytics("free_teasers_sent")
             with state_lock:
                 info.setdefault("delivery_targets", []).append(
@@ -4185,7 +4285,7 @@ def schedule_free_delivery(signal_key: str, chat_id, message_text: str) -> None:
                         "chat_id": chat_id,
                         "message_id": getattr(sent, "message_id", None),
                         "audience": "free",
-                        "original_text": message_text,
+                        "original_text": text_to_send,
                     }
                 )
             salva_dati_web()
@@ -4198,6 +4298,88 @@ def schedule_free_delivery(signal_key: str, chat_id, message_text: str) -> None:
     pending_free_timers[signal_key] = timer
     timer.start()
     increment_analytics("free_teasers_scheduled")
+
+
+def format_ai_analysis_block(result: dict) -> str:
+    """Blocco da appendere al messaggio del segnale."""
+    analysis = str(result.get("analysis") or "").strip()
+    if not analysis:
+        return ""
+    verdict = str(result.get("verdict") or "CONFERMA").upper()
+    reason = str(result.get("reason") or "").strip()
+    icons = {"CONFERMA": "✅", "ATTENZIONE": "⚠", "SALTA": "⛔"}
+    line = f"{icons.get(verdict, '')} <b>{escape_html(verdict)}</b>"
+    if reason and verdict != "CONFERMA":
+        line += f" — {escape_html(reason)}"
+    return f"\n{SEPARATOR}\n<b>ANALISI</b>\n{escape_html(analysis)}\n\n{line}"
+
+
+def schedule_ai_analysis(signal_key: str, ctx) -> None:
+    """Arricchisce il segnale gia' pubblicato con l'analisi AI.
+
+    Gira in un thread separato di proposito: la chiamata con ricerca web impiega
+    decine di secondi, mentre il segnale deve uscire entro il minuto 5. Prima si
+    pubblica, poi si modifica il messaggio. Per questo il verdetto qui e'
+    informativo: quando arriva, il segnale e' gia' partito. Il veto che puo'
+    agire davvero e' quello sul radar prematch, dove il tempo c'e'.
+    """
+    def _run():
+        try:
+            result = oracle_ai.analyze_signal(ctx)
+        except Exception as exc:
+            log_event("AI_ANALYSIS_ERROR", f"key={signal_key} err={exc}")
+            return
+        if not result.get("available"):
+            log_event("AI_ANALYSIS_SKIPPED", f"key={signal_key} reason={result.get('reason', '')}")
+            return
+        block = format_ai_analysis_block(result)
+        if not block:
+            return
+
+        with state_lock:
+            info = stats["monitor_risultati"].get(signal_key)
+            if not info:
+                return
+            # Il teaser free parte in ritardo: se l'analisi e' gia' qui,
+            # verra' inclusa direttamente invece di essere aggiunta dopo.
+            info["ai_analysis"] = block
+            info["ai_verdict"] = result.get("verdict")
+            targets = list(info.get("delivery_targets") or [])
+
+        for target in targets:
+            original = target.get("original_text") or ""
+            if not original or block in original:
+                continue
+            updated = original + block
+            try:
+                bot.edit_message_text(
+                    chat_id=target.get("chat_id"),
+                    message_id=target.get("message_id"),
+                    text=updated,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                print(f"Edit analisi fallito per {target.get('chat_id')}: {exc}")
+                continue
+            with state_lock:
+                info = stats["monitor_risultati"].get(signal_key)
+                if not info:
+                    break
+                for stored in info.get("delivery_targets") or []:
+                    if stored.get("message_id") == target.get("message_id"):
+                        stored["original_text"] = updated
+
+        usage = result.get("usage") or {}
+        log_event(
+            "AI_ANALYSIS_OK",
+            f"key={signal_key} verdict={result.get('verdict')} "
+            f"tokens_in={usage.get('input')} tokens_out={usage.get('output')} "
+            f"cache={usage.get('cache_read')}",
+        )
+        salva_dati_web()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
 
 
 def record_signal_delivery(signal_key: str, tier: str, full_message: str, free_message: str, private_premium_message: str = ""):
@@ -4274,6 +4456,7 @@ def radar_loop() -> None:
                 "pending_or_sent": 0,
                 "market_window": 0,
                 "no_model": 0,
+                "odds_skip": 0,
                 "candidate_failed": 0,
                 "performance_skip": 0,
                 "live_stats_skip": 0,
@@ -4458,12 +4641,20 @@ def radar_loop() -> None:
                         log_event("PRESSURE_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} titan_prob={(titan_pressure_prob if titan_pressure_prob is not None else -1):.2f} titan_score={titan_soft.get('score', 0)} shots={shots_on_goal_at_open}/{total_shots_at_open} corners={corners_at_open}")
                         pressure_alert_reason = None
                         live_pressure_available = has_live_pressure_data(stats_payload)
-                        if not live_pressure_available:
-                            if market == MARKET_OVER05_HT and total_goals == 0 and prob >= 0.78 and combined_metrics["avg_ht_goals"] >= 0.92 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.62:
+                        # Il ritmo HT inventato dal fallback non deve aprire nulla
+                        # sui market di primo tempo, nemmeno per questa scorciatoia.
+                        ht_metrics_trusted = not combined_metrics.get("ht_synthetic")
+                        if not live_pressure_available and ht_metrics_trusted:
+                            if market == MARKET_OVER05_HT and total_goals == 0 and prob >= 0.78 and combined_metrics["avg_ht_goals"] >= 1.30 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.80:
                                 pressure_alert_reason = f"risky early HT pressure alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
                             elif market == MARKET_OVER15_HT and total_goals == 1 and prob >= 0.80 and combined_metrics["avg_ht_goals"] >= 1.08 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.72:
                                 pressure_alert_reason = f"risky early HT continuation alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
-                        if pressure_alert_reason is None and titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
+                        # Anche la pressione Titan non basta ad aprire un market di
+                        # primo tempo se il ritmo HT della coppia e' inventato.
+                        titan_may_open = ht_metrics_trusted or market not in {MARKET_OVER05_HT, MARKET_OVER15_HT}
+                        if not titan_may_open:
+                            pass
+                        elif pressure_alert_reason is None and titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
                             pressure_alert_reason = f"titan pressure alert {titan_pressure_prob:.2f}"
                         elif pressure_alert_reason is None and titan_soft.get("score", 0) >= 3:
                             pressure_alert_reason = titan_soft.get("label", "titan pressure alert")
@@ -4507,11 +4698,18 @@ def radar_loop() -> None:
 
                     # Quota reale all'apertura, recuperata anche per gli shadow: senza di essa
                     # ogni ROI resta un'ipotesi basata sulla quota fissa di config.
-                    live_odd = None
-                    if market == MARKET_NEXT_GOAL:
-                        live_odd = fetch_next_goal_live_odds(fixture_id, headers, total_goals)
+                    live_odd = fetch_live_market_odd(fixture_id, headers, market, total_goals)
 
                     if not shadow_only:
+                        odds_skip, odds_reason = should_skip_by_odds(market, live_odd)
+                        if odds_skip:
+                            scan_debug["odds_skip"] = scan_debug.get("odds_skip", 0) + 1
+                            log_event(
+                                "ODDS_GATE_SKIP",
+                                f"fixture_id={fixture_id} market={market} minute={minute_value} {odds_reason}",
+                            )
+                            continue
+
                         skip_signal, skip_reason = should_skip_by_live_performance(market, league_name, minute_bucket)
                         if skip_signal:
                             scan_debug["performance_skip"] += 1
@@ -4582,6 +4780,23 @@ def radar_loop() -> None:
                                 live_odd=live_odd,
                             )
                         deliveries = record_signal_delivery(signal_key, tier, full_msg, free_msg, private_premium_msg)
+                        if oracle_ai.is_available():
+                            schedule_ai_analysis(signal_key, oracle_ai.SignalContext(
+                                home_team=home_db or match_up.split(" vs ")[0],
+                                away_team=away_db or match_up.split(" vs ")[-1],
+                                country=country,
+                                league=league_name,
+                                market=market,
+                                tier=tier,
+                                minute=minute_value,
+                                score=score,
+                                pair_ht_pace=combined_metrics["avg_ht_goals"],
+                                worst_ht_pace=min(combined_metrics["home_avg_ht_goals"],
+                                                  combined_metrics["away_avg_ht_goals"]),
+                                pair_total_pace=combined_metrics["avg_total_goals"],
+                                known_matches=str(combined_metrics.get("matches", "-")),
+                                live_odd=live_odd,
+                            ))
                         log_event(
                             "PRIVATE_PREMIUM_SIGNAL" if is_private_premium else "PRIVATE_PREMIUM_SKIP",
                             f"key={signal_key} market={market} league={league_name} country={country} minute={minute_value} reason={private_premium_reason}",
@@ -4673,6 +4888,7 @@ def radar_loop() -> None:
                 f"market_window={scan_debug['market_window']} "
                 f"no_model={scan_debug['no_model']} "
                 f"candidate_failed={scan_debug['candidate_failed']} "
+                f"odds_skip={scan_debug.get('odds_skip', 0)} "
                 f"performance_skip={scan_debug['performance_skip']} "
                 f"live_stats_skip={scan_debug['live_stats_skip']} "
                 f"signals_opened={scan_debug['signals_opened']} "
@@ -5179,7 +5395,8 @@ if __name__ == "__main__":
             except Exception as exc:
                 if shutdown_requested:
                     break
-                print(f"Auto-restart polling: {exc}")
+                # Anche lo stdout finisce nel file di log sullo Space.
+                print(f"Auto-restart polling: {redact_secrets(exc)}")
                 log_event("POLLING_RESTART", str(exc))
                 time.sleep(5)
     else:

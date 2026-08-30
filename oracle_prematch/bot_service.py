@@ -1,153 +1,110 @@
+"""Adattatore fra il bot Telegram e il radar prematch OVER 0.5 HT.
+
+Sostituisce lo scanner di anomalie sulle quote che stava qui prima. Quello
+cercava cali sospetti prima del fischio d'inizio, ma non registrava alcun esito:
+il suo punteggio non e' mai stato verificato contro cosa fosse poi successo, si
+era fermato il 30 marzo 2026 e aveva accumulato 30 GB di risposte API grezze che
+nessuno leggeva.
+
+Il radar attuale usa la stessa logica del market OVER 0.5 HT del bot live —
+ritmo di primo tempo sulle ultime 50 partite note — applicata alle partite in
+programma, e serve a sapere in anticipo quali calci d'inizio presidiare.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from oracle_prematch.api_football_odds import ApiFootballOddsClient
-from oracle_prematch.pipeline import ScanSummary, build_outcomes_from_fixtures, write_outputs
-from oracle_prematch.settings import (
-    API_FOOTBALL_HOST,
-    API_FOOTBALL_KEY,
-    API_FOOTBALL_LOOKBACK_HOURS,
-    API_FOOTBALL_TIMEOUT,
-    DEFAULT_TOP,
-    LATEST_JSON_PATH,
-    LATEST_TEXT_PATH,
-    PREMATCH_DB_PATH,
-)
-from oracle_prematch.storage import PrematchStore
+import prematch_radar
+
+
+@dataclass(slots=True)
+class RadarCandidate:
+    fixture_id: str
+    country: str
+    league: str
+    home_team: str
+    away_team: str
+    kickoff_utc: str
+    tier: str
+    pair_ht_pace: float
+    worst_ht_pace: float
+    pair_ft_pace: float
+    known_matches: str
+    prematch_odd: float | None
+
+
+@dataclass(slots=True)
+class RadarSummary:
+    total_fixtures: int
+    flagged_total: int
+    approved_total: int
+    caution_total: int
+    outcomes: list[RadarCandidate] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class PrematchBotResult:
-    summary: ScanSummary
-    odds_rows: int
-    snapshots_saved: int
+    summary: RadarSummary
     fixtures_seen: int
-    source_name: str
     date_value: str
+    skipped_unknown_team: int
+    skipped_no_ht_history: int
 
 
 @dataclass(slots=True)
 class PrematchCollectionResult:
-    odds_rows: int
-    snapshots_saved: int
-    fixtures_seen: int
-    source_name: str
-    date_value: str
-    fixture_ids: list[str]
+    """Mantenuta per compatibilita': il radar non accumula snapshot."""
+    odds_rows: int = 0
+    snapshots_saved: int = 0
+    fixtures_seen: int = 0
+    source_name: str = "prematch-radar"
+    date_value: str = ""
+    fixture_ids: list[str] = field(default_factory=list)
 
 
-def _build_client() -> ApiFootballOddsClient:
-    return ApiFootballOddsClient(
-        api_key=API_FOOTBALL_KEY,
-        base_url=API_FOOTBALL_HOST,
-        timeout_seconds=API_FOOTBALL_TIMEOUT,
-    )
+def collect_prematch_snapshots(date_value: str | None = None, page_limit: int | None = None,
+                               source_name: str = "prematch-radar") -> PrematchCollectionResult:
+    """No-op: il radar calcola al momento e non ha bisogno di uno storico quote."""
+    return PrematchCollectionResult(date_value=date_value or datetime.now().date().isoformat(),
+                                    source_name=source_name)
 
 
-def _fetch_and_store_snapshots(
-    scan_date: str,
-    source_name: str,
-    page_limit: int | None = None,
-) -> PrematchCollectionResult:
-    store = PrematchStore(PREMATCH_DB_PATH)
-    client = _build_client()
-
-    odds_rows = client.fetch_odds(date_value=scan_date, page_limit=page_limit)
-    fixture_ids = [str(((row.get("fixture") or {}).get("id")) or "").strip() for row in odds_rows]
-    fixture_ids = [fixture_id for fixture_id in fixture_ids if fixture_id]
-    fixtures_by_id = client.fetch_fixtures_for_date(
-        date_value=scan_date,
-        fixture_ids=list(dict.fromkeys(fixture_ids)),
-        page_limit=page_limit,
-    )
-    events = client.normalize_events(odds_rows, fixtures_by_id)
-
-    snapshots_saved = 0
-    touched_fixture_ids: list[str] = []
-    for event in events:
-        store.upsert_fixture(
-            fixture_id=event.fixture_id,
-            sport=event.sport,
-            country=event.country,
-            league=event.league,
-            home_team=event.home_team,
-            away_team=event.away_team,
-            kickoff_utc=event.kickoff_utc.isoformat(),
-            tags=event.tags,
-            notes=event.notes,
-        )
-        saved = store.save_odds_snapshot(
-            fixture_id=event.fixture_id,
-            source_name=source_name,
-            captured_at_utc=event.captured_at_utc.isoformat(),
-            bookmaker_count=event.bookmaker_count,
-            home_odds=event.home_odds,
-            draw_odds=event.draw_odds,
-            away_odds=event.away_odds,
-            over25_odds=event.over25_odds,
-            under25_odds=event.under25_odds,
-            raw_payload=event.raw_payload,
-        )
-        if saved:
-            snapshots_saved += 1
-        touched_fixture_ids.append(event.fixture_id)
-
-    return PrematchCollectionResult(
-        odds_rows=len(odds_rows),
-        snapshots_saved=snapshots_saved,
-        fixtures_seen=len(list(dict.fromkeys(touched_fixture_ids))),
-        source_name=source_name,
-        date_value=scan_date,
-        fixture_ids=list(dict.fromkeys(touched_fixture_ids)),
-    )
-
-
-def collect_prematch_snapshots(
-    date_value: str | None = None,
-    page_limit: int | None = None,
-    source_name: str = "api-football-odds",
-) -> PrematchCollectionResult:
+def run_prematch_bot_scan(date_value: str | None = None, top: int = 15,
+                          lookback_hours: int = 0, page_limit: int | None = None,
+                          source_name: str = "prematch-radar",
+                          with_odds: bool = False) -> PrematchBotResult:
     scan_date = date_value or datetime.now().date().isoformat()
-    return _fetch_and_store_snapshots(scan_date=scan_date, source_name=source_name, page_limit=page_limit)
-
-
-def run_prematch_bot_scan(
-    date_value: str | None = None,
-    top: int = DEFAULT_TOP,
-    lookback_hours: int = API_FOOTBALL_LOOKBACK_HOURS,
-    page_limit: int | None = None,
-    source_name: str = "api-football-odds",
-) -> PrematchBotResult:
-    scan_date = date_value or datetime.now().date().isoformat()
-    collection = _fetch_and_store_snapshots(scan_date=scan_date, source_name=source_name, page_limit=page_limit)
-    store = PrematchStore(PREMATCH_DB_PATH)
-    unique_fixture_ids = collection.fixture_ids
-    fixtures = store.build_fixture_inputs(
-        fixture_ids=unique_fixture_ids,
-        lookback_hours=lookback_hours,
-        source_name=source_name,
-        min_snapshots=2,
+    result = prematch_radar.scan(date_value=scan_date, min_tier="CAUTION",
+                                 with_odds=with_odds, known_leagues=True)
+    candidates = [
+        RadarCandidate(
+            fixture_id=str(c["fixture_id"]),
+            country=c["country"],
+            league=c["league"],
+            home_team=c["home_team"],
+            away_team=c["away_team"],
+            kickoff_utc=c["kickoff_utc"],
+            tier=c["tier"],
+            pair_ht_pace=c["pair_ht_pace"],
+            worst_ht_pace=c["worst_ht_pace"],
+            pair_ft_pace=c["pair_ft_pace"],
+            known_matches=c["known_matches"],
+            prematch_odd=c["prematch_odd"],
+        )
+        for c in result["candidates"]
+    ]
+    summary = RadarSummary(
+        total_fixtures=result["fixtures_total"],
+        flagged_total=len(candidates),
+        approved_total=sum(1 for c in candidates if c.tier == "APPROVED"),
+        caution_total=sum(1 for c in candidates if c.tier == "CAUTION"),
+        outcomes=candidates[:top],
     )
-    outcomes = build_outcomes_from_fixtures(fixtures)
-    run_id = store.save_run(source_name=source_name, total_fixtures=len(fixtures), outcomes=outcomes)
-
-    summary = ScanSummary(
-        run_id=run_id,
-        source_name=source_name,
-        total_fixtures=len(fixtures),
-        flagged_total=sum(1 for outcome in outcomes if outcome.status != "IGNORE"),
-        watch_live_total=sum(1 for outcome in outcomes if outcome.status == "WATCH LIVE"),
-        manual_review_total=sum(1 for outcome in outcomes if outcome.status == "MANUAL REVIEW"),
-        outcomes=[outcome for outcome in outcomes if outcome.status != "IGNORE"][:top],
-    )
-    write_outputs(summary, output_json_path=LATEST_JSON_PATH, output_text_path=LATEST_TEXT_PATH)
     return PrematchBotResult(
         summary=summary,
-        odds_rows=collection.odds_rows,
-        snapshots_saved=collection.snapshots_saved,
-        fixtures_seen=collection.fixtures_seen,
-        source_name=source_name,
+        fixtures_seen=result["fixtures_total"],
         date_value=scan_date,
+        skipped_unknown_team=result["skipped_unknown_team"],
+        skipped_no_ht_history=result["skipped_no_ht_history"],
     )

@@ -66,11 +66,15 @@ def link_data_files():
 
 
 def read_control() -> dict:
+    # Default spento: il bot dello Space va acceso esplicitamente dalla Control
+    # Room. Con il default acceso, ogni container nuovo o /data ripulito faceva
+    # partire una seconda istanza in parallelo a quella locale, con segnali
+    # doppi sugli stessi canali e conflitti 409 sul polling Telegram.
     try:
         with open(CONTROL_FILE, "r") as f:
             return json.load(f)
     except Exception:
-        return {"bot_enabled": True}
+        return {"bot_enabled": False}
 
 
 def write_control(data: dict):
@@ -124,7 +128,7 @@ def bot_watcher():
     while True:
         time.sleep(10)
         ctrl = read_control()
-        if ctrl.get("bot_enabled", True):
+        if ctrl.get("bot_enabled", False):
             with BOT_LOCK:
                 dead = BOT_PROCESS is None or BOT_PROCESS.poll() is not None
             if dead:
@@ -176,10 +180,10 @@ def main():
 
     # Write default control file if missing
     if not os.path.exists(CONTROL_FILE):
-        write_control({"bot_enabled": True})
+        write_control({"bot_enabled": False})
 
     ctrl = read_control()
-    if ctrl.get("bot_enabled", True):
+    if ctrl.get("bot_enabled", False):
         start_bot()
 
     watcher = threading.Thread(target=bot_watcher, daemon=True)

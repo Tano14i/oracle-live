@@ -60,7 +60,10 @@ API_FOOTBALL_HOST = get_setting("PREMATCH_API_FOOTBALL_HOST", "https://v3.footba
 API_FOOTBALL_KEY = get_setting("PREMATCH_API_FOOTBALL_KEY", get_setting("API_KEY"))
 API_FOOTBALL_LOOKBACK_HOURS = int(get_setting("PREMATCH_API_FOOTBALL_LOOKBACK_HOURS", "48") or "48")
 API_FOOTBALL_TIMEOUT = int(get_setting("PREMATCH_API_FOOTBALL_TIMEOUT", "30") or "30")
-PREMATCH_AUTO_COLLECT_ENABLED = get_bool_setting("PREMATCH_AUTO_COLLECT_ENABLED", True)
+# Spento di default: la raccolta automatica salvava la risposta API completa in
+# `raw_json`, 87 KB per snapshot, e aveva accumulato 30 GB di dati che nessuno
+# leggeva dal 30 marzo. Il radar prematch_radar.py non usa questo archivio.
+PREMATCH_AUTO_COLLECT_ENABLED = get_bool_setting("PREMATCH_AUTO_COLLECT_ENABLED", False)
 PREMATCH_AUTO_COLLECT_INTERVAL_SECONDS = int(get_setting("PREMATCH_AUTO_COLLECT_INTERVAL_SECONDS", "600") or "600")
 PREMATCH_AUTO_COLLECT_PAGE_LIMIT = int(get_setting("PREMATCH_AUTO_COLLECT_PAGE_LIMIT", "3") or "3")
 

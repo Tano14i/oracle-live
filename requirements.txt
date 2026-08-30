@@ -10,3 +10,4 @@ kagglehub
 pyarrow
 aiofiles
 huggingface_hub
+anthropic

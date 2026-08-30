@@ -66,6 +66,79 @@ Nota: il filtro attivo viene persistito in `web_stats.json`; su installazioni gi
 
 Le quote per market usate per P/L e ROI sono configurabili: `QUOTA_O05_HT`, `QUOTA_O15_HT`, `QUOTA_NEXT_GOAL` (fallback `QUOTA`). **Sono solo un fallback**: quando il book espone la quota live, il P/L viene calcolato su quella (vedi sotto).
 
+### Strato di analisi AI
+
+`oracle_ai.py` aggiunge un'analisi scritta ai segnali, usando Claude con ricerca web.
+
+**Non sceglie le partite.** La selezione resta ai numeri misurati: finestra di 50 partite, ritmo di primo tempo sulle sole partite a dato noto, soglie verificate su 357.573 partite con gruppo di controllo. L'AI interviene dopo, e fa due cose che i numeri non sanno fare: spiega il segnale in prosa per il canale VIP, e cerca il contesto qualitativo che il dataset non contiene — infortuni, formazioni, squalifiche, motivazione di classifica, meteo.
+
+Puo' restituire tre verdetti: `CONFERMA`, `ATTENZIONE` (fatti concreti che riducono i gol attesi) e `SALTA` (solo per fatti gravi e verificati). Il veto e' consultivo e sempre motivato.
+
+Due garanzie nel codice: il prompt vieta di inventare statistiche — l'AI ragiona sui numeri che riceve e per il contesto cita le fonti trovate; e ogni fallimento (rete, quota, rifiuto, verdetto illeggibile) restituisce `CONFERMA`, cosi' il segnale non dipende mai dalla disponibilita' dell'AI.
+
+Spento di default. Si attiva con `ORACLE_AI_ENABLED=1` e `ANTHROPIC_API_KEY` nel `.env`. Il prompt di sistema e' identico a ogni chiamata e viene messo in cache, quindi il costo per segnale resta basso.
+
+**Consegna asincrona.** La chiamata con ricerca web impiega decine di secondi, mentre il segnale deve uscire entro il minuto 5. Il bot quindi pubblica subito e poi modifica il messaggio aggiungendo l'analisi, su tutti i canali: admin, VIP e free. Il teaser free parte dopo `FREE_DELAY_SECONDS`, quindi di norma include gia' l'analisi senza bisogno di una modifica.
+
+Conseguenza da conoscere: **nel live il verdetto e' informativo**, perche' quando arriva il segnale e' gia' partito. Il veto che puo' davvero impedire una giocata e' quello sul radar prematch, dove le ore prima del calcio d'inizio lasciano il tempo di decidere.
+
+### Radar pre-match OVER 0.5 HT
+
+`prematch_radar.py` applica alle partite in programma lo stesso filtro sul ritmo di primo tempo che il bot usa in diretta. Il filtro e' interamente storico, quindi si puo' calcolare prima del fischio d'inizio.
+
+**Non serve a scommettere prematch.** Le quote prematch di questo mercato sono piu' corte di quelle live: rilevate fra 1.13 e 1.45, mediana 1.27, contro 1.40-1.53 al minuto 1-5. A 1.27 il pareggio richiede il 78.7%, che nemmeno il tier CAUTION (75.0% misurato nel backtest) raggiunge. Aspettare i primi minuti vale circa 18 punti di quota.
+
+Serve invece a **presidiare i calci d'inizio giusti**: il bot live aggancia solo il 59% delle partite entro il minuto 5, e sapere in anticipo quali contano elimina quella perdita.
+
+Comandi: `--date`, `--min-tier`, `--with-odds` (una chiamata per candidata), `--known-leagues` (solo campionati gia' incontrati dal bot). Salva la watchlist in `prematch_radar_watchlist.json`; nel bot Telegram e' il comando `/prematch_today`.
+
+Un limite da conoscere: il ritmo alto premia divisioni minori e giovanili, dove il mercato spesso non esiste. Su 72 candidate del tier APPROVED solo 9 avevano una quota prematch esposta.
+
+Ha sostituito lo scanner di anomalie sulle quote che stava in `oracle_prematch/`. Quello cercava cali sospetti prima del kickoff ma non registrava alcun esito, quindi il suo punteggio non e' mai stato verificato; si era fermato il 30 marzo 2026 e aveva accumulato 30 GB di risposte API grezze che nessuno leggeva. `PREMATCH_AUTO_COLLECT_ENABLED` e' ora spento di default.
+
+### Dati di primo tempo e soglie OVER 0.5 HT
+
+`football_data_ht_import.py` scarica i CSV gratuiti di football-data.co.uk (22 divisioni europee, colonne `HTHG`/`HTAG`) e li fonde in `Matches.csv` agganciando le partite su data e nomi normalizzati. Comandi: `--download`, `--report` (quante righe correggerebbe, senza scrivere), `--write`.
+
+Serviva perche' in `Matches.csv` il primo tempo era assente nel 91% delle partite con 2+ gol, e `get_team_metrics` lo sostituiva con un valore ricavato dal ritmo totale (`avg_total_goals * 0.38`, limitato a [0.8, 1.35]). Siccome il minimo inventato coincideva con la soglia richiesta, il filtro sul ritmo HT non filtrava nulla.
+
+Due conseguenze in `oracle_live.py`:
+
+- `TEAM_HISTORY_WINDOW` e' 50, non 12. Misurato su 53.698 partite con HT reale: la correlazione con i gol del primo tempo passa da 0.071 (finestra 12) a 0.107 (finestra 50). I gol di primo tempo sono rari, quindi serve piu' campione.
+- le soglie di `avg_ht_goals` per OVER 0.5 HT sono 1.10 / 1.30 / 1.60, non 0.80 / 0.86 / 1.00. Win rate osservato per fascia, contro un breakeven del 69% a quota 1.45: 0.7-0.9 = 64.0%, 0.9-1.1 = 67.3%, 1.1-1.3 = 70.0%, 1.3-1.6 = 73.5%, 1.6+ = 78.4%. La vecchia soglia accettava proprio la fascia in perdita.
+
+Le metriche marcate `ht_synthetic` non possono aprire un segnale reale sui market di primo tempo, ne' tramite i tier ne' tramite le scorciatoie di pressione.
+
+### La colonna `HTKnown`
+
+Nel CSV "primo tempo 0-0" e "primo tempo sconosciuto" si scrivevano entrambi `0`. L'ambiguita' costringeva `get_team_metrics` a indovinare con un'euristica quali zeri fossero dati mancanti, e metteva un tetto artificiale dell'82% a qualunque misura di copertura: il 17-18% delle partite con 2+ gol e' davvero 0-0 all'intervallo, quindi indistinguibile da un buco.
+
+`HTKnown` vale 1 solo quando la fonte espone davvero il primo tempo. Entrambe le fonti lo permettono: football-data.co.uk ha le colonne `HTHG`/`HTAG` sempre valorizzate, l'API distingue lo zero dal nullo in `score.halftime`.
+
+Con la colonna presente, `get_team_metrics` calcola `avg_ht_goals` **solo sulle partite in cui il dato e' noto**, e marca `ht_synthetic` quando quelle note sono meno di 6. Senza la colonna resta l'euristica precedente, come riserva.
+
+La differenza non e' cosmetica: su una squadra con 6 partite note a media 2.0 e 4 righe senza dato, l'euristica restituiva 1.2 invece di 2.0, facendola scendere sotto la soglia CAUTION.
+
+`api_football_league_import.py` importa lo storico un campionato alla volta (una chiamata restituisce l'intera stagione, ~380 partite, contro 3 chiamate per singola squadra) e traccia le coppie campionato-stagione gia' fatte, cosi' si puo' procedere a lotti.
+
+### Grafie duplicate delle squadre
+
+`normalize_team_names.py` unifica le grafie diverse della stessa squadra (`LIVERPOOL FOOTBALL CLUB` e `LIVERPOOL`), che spezzavano lo storico fra le varianti e facevano agganciare a `trova_squadra` la variante sbagliata, a volte quella senza primo tempo.
+
+I candidati vengono proposti da una regola conservativa che toglie solo i marcatori generici (`football`, `club`, `association`, `fc`, `afc`) e devono poi superare due prove che dimostrerebbero il contrario: le due squadre si sono mai affrontate, e hanno mai giocato lo stesso giorno contro avversari diversi e con punteggio diverso. Un gruppo che fallisce una prova non viene accorpato — cosi' restano separati `CLUB NACIONAL` da `NACIONAL`, e `BARCELONA` o `EVERTON`, che in questo dataset sono ambigui perche' esistono anche club omonimi sudamericani.
+
+`--dedupe-matches` gestisce il caso residuo: nomi troppo ambigui per essere unificati ma partite comunque riconoscibili come identiche (stessa data, stesso punteggio, stesso nome ridotto per entrambe le squadre). Fra due copie vince quella con il primo tempo reale.
+
+Comandi: `--report`, `--write`, `--dedupe-matches --write`.
+
+### Filtro quote
+
+Un segnale viene pubblicato solo se la quota live copre il proprio breakeven: sotto `MIN_ODD_O05_HT` / `MIN_ODD_O15_HT` / `MIN_ODD_NEXT_GOAL` viene scartato con evento `ODDS_GATE_SKIP`. Con `ODDS_GATE_STRICT=1` vengono scartati anche i segnali per cui la quota non e' recuperabile.
+
+Serve a un problema misurato: NEXT GOAL vince il 62.8% delle volte nella finestra 1-19, ma il mercato reale paga 1.02-1.13, dove il breakeven e' il 91.7%. Erano segnali vinti sul campo e in perdita in cassa (-31.5% per puntata). Con il filtro attivo quel market si spegne da solo finche' non ritrova valore, senza doverlo disabilitare a mano.
+
+OVER 0.5 HT invece paga davvero 1.40-1.53 nei primi 5 minuti, contro un WR misurato del 72.5%: e' l'unica finestra con margine positivo trovata finora.
+
 ### Quote reali (`OpenOdd`)
 
 Ogni segnale, reale o shadow, registra in `live_training_data.csv` la colonna `OpenOdd`: la quota effettivamente disponibile al momento dell'apertura. Per NEXT GOAL viene letta la linea `Over (gol correnti + 0.5)`, che e' l'esito su cui il segnale viene poi chiuso; se la linea non e' esposta il bot logga `LIVE_ODDS_NO_LINE` con gli esiti disponibili e lascia il campo vuoto.

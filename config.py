@@ -51,10 +51,24 @@ STAKE = float(get_setting("STAKE", "10.0") or "10.0")
 QUOTA = float(get_setting("QUOTA", "1.75") or "1.75")
 
 # Quote medie reali per market: usate per P/L, ROI e breakeven onesti.
-# OVER 0.5 HT aperto presto a 0-0 quota tipicamente 1.25-1.40, non 1.75.
-QUOTA_O05_HT = float(get_setting("QUOTA_O05_HT", "1.30") or "1.30")
+# Solo fallback: quando il book espone la quota live si usa quella (OpenOdd).
+# Valori rilevati dal vivo sul mercato "Over/Under (1st Half)" linea 0.5:
+# 1.40-1.53 al minuto 1-5, 1.57-1.73 al 18-21, 2.10 al 28.
+QUOTA_O05_HT = float(get_setting("QUOTA_O05_HT", "1.45") or "1.45")
 QUOTA_O15_HT = float(get_setting("QUOTA_O15_HT", "1.50") or "1.50")
 QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", str(QUOTA)) or str(QUOTA))
+
+# Filtro quote: quota live minima per pubblicare un segnale.
+# Sotto questi valori il segnale non copre il proprio breakeven e viene scartato.
+# NEXT GOAL sul mercato reale paga 1.02-1.13 contro un WR del 62.8%: con questa
+# soglia si spegne da solo, che e' l'esito voluto finche' non ritrova valore.
+MIN_ODD_O05_HT = float(get_setting("MIN_ODD_O05_HT", "1.40") or "1.40")
+MIN_ODD_O15_HT = float(get_setting("MIN_ODD_O15_HT", "1.60") or "1.60")
+MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
+# Con 1: scarta anche i segnali per cui la quota non e' recuperabile.
+# Con 0 (default): li pubblica ma li marca nel log, per non perdere volume
+# quando il book semplicemente non espone il mercato.
+ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "0").lower() in {"1", "true", "yes"}
 
 # Finestra HT estesa oltre il minuto 20 sotto forte pressione live.
 # Tenere spenta finche' l'analisi shadow (analyze_shadow_signals.py) non conferma WR >= 60%.

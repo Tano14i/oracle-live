@@ -48,7 +48,13 @@ def normalize_matches_frame(df: pd.DataFrame) -> pd.DataFrame:
                 raise ValueError(f"Missing required column: {col}")
 
     working = working[OUTPUT_COLUMNS].copy()
-    working["MatchDate"] = pd.to_datetime(working["MatchDate"], errors="coerce")
+    # Le date dell'API arrivano con il fuso orario, quelle del CSV no. Concatenare
+    # una colonna tz-aware con una naive produce dtype object, e il to_datetime
+    # successivo trasforma in NaT ogni riga importata: venivano tutte scartate in
+    # silenzio e contate come duplicati. Si normalizza tutto a UTC senza fuso.
+    working["MatchDate"] = pd.to_datetime(
+        working["MatchDate"], errors="coerce", utc=True
+    ).dt.tz_localize(None)
     working = working.dropna(subset=["MatchDate", "HomeTeam", "AwayTeam"])
     working["HomeTeam"] = working["HomeTeam"].astype(str).str.strip().str.upper()
     working["AwayTeam"] = working["AwayTeam"].astype(str).str.strip().str.upper()
@@ -57,11 +63,35 @@ def normalize_matches_frame(df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
-def api_get(session: requests.Session, endpoint: str, params: dict) -> list:
-    response = session.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("response", [])
+def api_get(session: requests.Session, endpoint: str, params: dict, attempts: int = 4) -> list:
+    """GET con ritentativi sugli errori server.
+
+    L'API restituisce 5xx sporadici su query del tutto valide: senza ritentativi
+    la squadra veniva marcata fallita e messa in attesa per 12 ore, pur essendo
+    recuperabile subito. In un caso su 30 candidate ne sono andate perse 12 cosi'.
+    """
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = session.get(f"{API_BASE}{endpoint}", params=params, timeout=30)
+            if response.status_code >= 500:
+                last_error = requests.HTTPError(f"{response.status_code} server error")
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            # 200 con errore nel corpo: va trattato come guasto, non come
+            # "nessun risultato", altrimenti la squadra risulta irrisolvibile.
+            errors = payload.get("errors")
+            if isinstance(errors, dict) and errors:
+                last_error = requests.HTTPError(f"errore lato API: {errors}")
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            return payload.get("response", [])
+        except requests.RequestException as exc:
+            last_error = exc
+            time.sleep(1.5 * (attempt + 1))
+    raise last_error if last_error else RuntimeError("api_get failed")
 
 
 def fixture_to_row(fixture: dict) -> dict | None:
@@ -153,24 +183,30 @@ def save_queue(queue: dict) -> None:
         json.dump(queue, handle, indent=2)
 
 
-def merge_rows(csv_path: str, imported_frames: list[pd.DataFrame]) -> tuple[str, int, int, int]:
+def merge_rows(csv_path: str, imported_frames: list[pd.DataFrame]) -> tuple[str, int, int, int, int]:
     df_old = pd.read_csv(csv_path, low_memory=False)
     df_old = normalize_matches_frame(df_old)
     df_new = pd.concat(imported_frames, ignore_index=True) if imported_frames else pd.DataFrame(columns=OUTPUT_COLUMNS)
     if df_new.empty:
-        return "", len(df_old), len(df_old), 0
+        return "", len(df_old), len(df_old), 0, 0
 
     df_total = pd.concat([df_old, df_new], ignore_index=True)
     before_dedup = len(df_total)
-    df_total["MatchDate"] = pd.to_datetime(df_total["MatchDate"], errors="coerce")
+    df_total["MatchDate"] = pd.to_datetime(df_total["MatchDate"], errors="coerce", utc=True)
+    df_total["MatchDate"] = df_total["MatchDate"].dt.tz_localize(None)
+    # Contati separatamente: confondere righe con data illeggibile e duplicati
+    # nascondeva la perdita totale delle righe importate.
+    dropped_invalid_date = before_dedup - len(df_total.dropna(subset=["MatchDate"]))
     df_total = df_total.dropna(subset=["MatchDate"])
+    after_dropna = len(df_total)
     df_total = df_total.sort_values("MatchDate")
     df_total = df_total.drop_duplicates(subset=["MatchDate", "HomeTeam", "AwayTeam"], keep="last")
+    duplicates_removed = after_dropna - len(df_total)
     df_total["MatchDate"] = df_total["MatchDate"].dt.strftime("%Y-%m-%d")
 
     backup_path = backup_file(csv_path)
     df_total.to_csv(csv_path, index=False)
-    return backup_path, len(df_old), len(df_total), before_dedup - len(df_total)
+    return backup_path, len(df_old), len(df_total), duplicates_removed, dropped_invalid_date
 
 
 def parse_args() -> argparse.Namespace:
@@ -323,7 +359,9 @@ def main() -> None:
         print(f"Pending queue items remaining: {pending_after}")
         return
 
-    backup_path, before_rows, after_rows, duplicates_removed = merge_rows(CSV_PATH, imported_frames)
+    backup_path, before_rows, after_rows, duplicates_removed, dropped_invalid_date = merge_rows(
+        CSV_PATH, imported_frames
+    )
     print("\n" + "=" * 40)
     print("MISSING-TEAM BACKFILL COMPLETED")
     print(f"Resolved queue items: {resolved}")
@@ -333,7 +371,9 @@ def main() -> None:
     print(f"Backup created: {backup_path}")
     print(f"Rows before update: {before_rows}")
     print(f"Rows after update: {after_rows}")
+    print(f"Net rows added: {after_rows - before_rows}")
     print(f"Duplicates removed: {duplicates_removed}")
+    print(f"Rows dropped for invalid date: {dropped_invalid_date}")
     print("=" * 40)
 
 
