@@ -1,6 +1,13 @@
 # Secrets
+# Attenzione: "*.env" copre i file che FINISCONO per .env, non ".env.qualcosa".
+# oracle_prematch/.env.prematch e' rimasto scoperto ed e' finito nel repo
+# pubblico con chiave API e token Telegram dentro.
 .env
 *.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.*.example
 
 # Virtual env
 .venv/
@@ -35,6 +42,13 @@ oracle_perfection_report.json
 oracle_perfection_package.joblib
 titan_pressure_model.pkl
 titan_raw_snapshots_export.csv
+
+# Dati e stato rigenerabili
+football_data/
+api_football_leagues.json
+api_football_leagues_done.json
+prematch_radar_watchlist.json
+prematch_watchlist.db
 
 # Misc
 debug.png
