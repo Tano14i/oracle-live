@@ -9,6 +9,13 @@ Differenze rispetto a trainer.py originale:
 5. Aggiunge class_weight='balanced' per gestire sbilanciamento WIN/LOSS
 6. Salva metriche del modello finale, non di un modello intermedio
 7. Soglia decisionale ottimizzata per massimizzare precision invece di usare 0.5 fisso
+8. Probabilita' CALIBRATE (CalibratedClassifierCV): un 0.88 del Random Forest grezzo
+   non e' una probabilita'; i tier APPROVED/CAUTION/GAMBLING confrontano prob con il
+   breakeven della quota, quindi devono essere calibrate. Salvata anche la reliability table.
+9. Feature momentum (delta tiri/angoli negli ultimi N minuti prima dell'apertura) con
+   fill a 0 per le righe vecchie che non le hanno, cosi' lo storico resta usabile.
+10. Bucket 1-14 reintrodotto per OVER 0.5 HT (prima veniva escluso per errore: il commento
+    diceva "<= 20" ma il set conteneva solo "15-20").
 """
 
 import os
@@ -17,6 +24,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -48,9 +56,13 @@ PUBLIC_TIERS = {"APPROVED", "CAUTION", "GAMBLING"}
 # OVER 1.5 HT escluso (WR storico 28.3%)
 # OVER 0.5 HT limitato al minuto <= 20 (dopo crolla a 6-20%)
 VALID_MARKET_BUCKETS = {
-    "NEXT GOAL LIVE": None,           # tutti i bucket
-    "OVER 0.5 HT": {"15-20"},         # solo early
+    "NEXT GOAL LIVE": None,                 # tutti i bucket
+    "NEXT GOAL 2H MOMENTUM": None,          # market 46'-55' (logica momentum)
+    "OVER 0.5 HT": {"1-14", "15-20"},       # solo early (<= 20')
 }
+
+# Righe minime prima di usare la calibrazione isotonica (piu' flessibile ma affamata di dati).
+ISOTONIC_MIN_ROWS = 300
 
 FEATURE_COLUMNS = [
     "DNA",
@@ -67,7 +79,70 @@ FEATURE_COLUMNS = [
     "CornersAtOpen",
     "RedCardsAtOpen",
     "TitanPressureScore",
+    # Momentum: delta negli ultimi MOMENTUM_LOOKBACK_MINUTES prima dell'apertura.
+    "ShotsOnGoalDelta10AtOpen",
+    "TotalShotsDelta10AtOpen",
+    "CornersDelta10AtOpen",
+    "MomentumScoreAtOpen",
 ]
+
+# Colonne che possono mancare nello storico: riempite a 0 invece di scartare la riga.
+OPTIONAL_FEATURE_COLUMNS = [
+    "ShotsOnGoalDelta10AtOpen",
+    "TotalShotsDelta10AtOpen",
+    "CornersDelta10AtOpen",
+    "MomentumScoreAtOpen",
+]
+
+
+def ensure_optional_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for column in OPTIONAL_FEATURE_COLUMNS:
+        if column not in df.columns:
+            df[column] = 0.0
+        else:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    return df
+
+
+def build_calibrated_model(n_rows: int, min_class_count: int | None = None):
+    """Random Forest calibrato. Se la classe minoritaria ha meno campioni delle fold,
+    la calibrazione non e' possibile: si torna al RF nudo invece di far fallire il retrain."""
+    base = RandomForestClassifier(
+        n_estimators=300,
+        random_state=42,
+        min_samples_leaf=5,
+        class_weight="balanced",
+    )
+    method = "isotonic" if n_rows >= ISOTONIC_MIN_ROWS else "sigmoid"
+    cv = 5 if n_rows >= 100 else 3
+    if min_class_count is not None:
+        cv = min(cv, int(min_class_count))
+    if cv < 2:
+        return base
+    return CalibratedClassifierCV(base, method=method, cv=cv)
+
+
+def reliability_table(probs, y_true, bins: int = 5) -> list:
+    """Per ogni bin di probabilita' predetta: quanti segnali e WR reale. Serve a leggere
+    se un 0.80 del modello vale davvero l'80%."""
+    probs = np.asarray(probs, dtype=float)
+    y_true = np.asarray(y_true, dtype=int)
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    rows = []
+    for i in range(bins):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (probs >= lo) & (probs < hi) if i < bins - 1 else (probs >= lo) & (probs <= hi)
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        rows.append({
+            "bin": f"{lo:.1f}-{hi:.1f}",
+            "n": n,
+            "mean_prob": round(float(probs[mask].mean()), 3),
+            "real_wr": round(float(y_true[mask].mean()), 3),
+        })
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +183,9 @@ def apply_training_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     filtered = pd.concat(valid_rows, ignore_index=True) if valid_rows else pd.DataFrame()
     stats["excluded_invalid_market_bucket"] = len(public) - len(filtered)
 
-    # 4. Solo righe con tutte le feature
+    # 4. Solo righe con tutte le feature (quelle opzionali vengono riempite a 0)
     if not filtered.empty:
+        filtered = ensure_optional_features(filtered)
         full_feature_mask = filtered[FEATURE_COLUMNS].notna().all(axis=1)
         clean = filtered[full_feature_mask].copy()
         stats["excluded_missing_features"] = len(filtered) - len(clean)
@@ -221,13 +297,8 @@ def train_oracle_v2() -> dict:
         print(f"Win rate train: {y_train.mean()*100:.1f}% | test: {y_test.mean()*100:.1f}%")
         result["win_rate_test"] = round(float(y_test.mean()) * 100, 2)
 
-        # Modello di validazione
-        val_model = RandomForestClassifier(
-            n_estimators=300,
-            random_state=42,
-            min_samples_leaf=5,
-            class_weight="balanced",
-        )
+        # Modello di validazione: calibrato, cosi' la soglia trovata vale per il modello finale
+        val_model = build_calibrated_model(len(X_train), int(y_train.value_counts().min()))
         val_model.fit(X_train, y_train)
         test_probs = val_model.predict_proba(X_test)[:, 1]
 
@@ -255,6 +326,9 @@ def train_oracle_v2() -> dict:
             "optimal_threshold": optimal_threshold,
             "signals_above_threshold": int(test_preds.sum()),
             "rows_test": int(len(X_test)),
+            "rows": int(len(X_test)),
+            "calibration_method": getattr(val_model, "method", "none"),
+            "reliability": reliability_table(test_probs, y_test),
         }
 
         print(f"\nValidazione (split temporale):")
@@ -264,6 +338,10 @@ def train_oracle_v2() -> dict:
         print(f"  Precision a soglia ottim.: {validation['precision_at_optimal']:.3f}")
         print(f"  Recall a soglia ottimale:  {validation['recall_at_optimal']:.3f}")
         print(f"  Segnali sopra soglia:      {validation['signals_above_threshold']}/{len(X_test)}")
+        print(f"  Calibrazione:              {validation['calibration_method']}")
+        print("  Reliability (prob predetta -> WR reale):")
+        for row in validation["reliability"]:
+            print(f"    {row['bin']}: n={row['n']:<4} prob={row['mean_prob']:.2f} wr={row['real_wr']:.2f}")
 
         # Verifica inversione predizione
         mean_prob_win = float(test_probs[y_test == 1].mean())
@@ -276,13 +354,8 @@ def train_oracle_v2() -> dict:
         else:
             print("  ✅ Predizione nella direzione corretta.")
 
-    # Modello finale su tutto il dataset filtrato
-    final_model = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        min_samples_leaf=5,
-        class_weight="balanced",
-    )
+    # Modello finale (calibrato) su tutto il dataset filtrato
+    final_model = build_calibrated_model(len(X), int(y.value_counts().min()))
     final_model.fit(X, y)
 
     # Salva
@@ -295,7 +368,15 @@ def train_oracle_v2() -> dict:
         f.write(str(optimal_threshold))
     print(f"\nSoglia ottimale salvata in: {threshold_path}")
 
-    importances = dict(zip(FEATURE_COLUMNS, final_model.feature_importances_))
+    # Importances: media sugli estimator interni del wrapper calibrato
+    try:
+        if hasattr(final_model, "calibrated_classifiers_"):
+            inner = [cc.estimator for cc in final_model.calibrated_classifiers_]
+            importances = dict(zip(FEATURE_COLUMNS, np.mean([m.feature_importances_ for m in inner], axis=0)))
+        else:
+            importances = dict(zip(FEATURE_COLUMNS, final_model.feature_importances_))
+    except Exception:
+        importances = {}
     result["feature_importances"] = importances
     result["validation"] = validation
     result["model_path"] = target_path

@@ -17,6 +17,7 @@ import pandas as pd
 
 from config import (
     LIVE_TRAINING_DATA_PATH,
+    QUOTA_2H_MOMENTUM,
     QUOTA_NEXT_GOAL,
     QUOTA_O05_HT,
     QUOTA_O15_HT,
@@ -27,6 +28,7 @@ MARKET_QUOTAS = {
     "OVER 0.5 HT": QUOTA_O05_HT,
     "OVER 1.5 HT": QUOTA_O15_HT,
     "NEXT GOAL LIVE": QUOTA_NEXT_GOAL,
+    "NEXT GOAL 2H MOMENTUM": QUOTA_2H_MOMENTUM,
 }
 
 

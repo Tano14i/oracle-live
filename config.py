@@ -60,6 +60,16 @@ QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", str(QUOTA)) or str(QUOTA)
 # Tenere spenta finche' l'analisi shadow (analyze_shadow_signals.py) non conferma WR >= 60%.
 HT_PRESSURE_WINDOW_ENABLED = get_setting("HT_PRESSURE_WINDOW_ENABLED", "0").lower() in {"1", "true", "yes"}
 HT_PRESSURE_WINDOW_MAX_MINUTE = int(get_setting("HT_PRESSURE_WINDOW_MAX_MINUTE", "28") or "28")
+
+# Market "NEXT GOAL 2H MOMENTUM" (logica 47'): entra a inizio ripresa solo con >= 4 tiri in porta,
+# mai da 0-0 in canale, quota minima 1.40 (parziale entro 75'/80' o linea superiore).
+MOMENTUM_2H_ENABLED = get_setting("MOMENTUM_2H_ENABLED", "1").lower() in {"1", "true", "yes"}
+QUOTA_2H_MOMENTUM = float(get_setting("QUOTA_2H_MOMENTUM", "1.40") or "1.40")
+# Se la quota live e' nota e sotto il minimo del tier, il segnale va in shadow invece che in canale.
+ENFORCE_MIN_QUOTA = get_setting("ENFORCE_MIN_QUOTA", "1").lower() in {"1", "true", "yes"}
+# Delta stats calcolato sugli ultimi N minuti (feature momentum) e follow-up post-segnale dopo M minuti.
+MOMENTUM_LOOKBACK_MINUTES = int(get_setting("MOMENTUM_LOOKBACK_MINUTES", "10") or "10")
+MOMENTUM_FOLLOWUP_MINUTES = int(get_setting("MOMENTUM_FOLLOWUP_MINUTES", "8") or "8")
 VIP_PRICE_XTR = int(get_setting("VIP_PRICE_XTR", "499") or "499")
 VIP_DURATION_DAYS = int(get_setting("VIP_DURATION_DAYS", "30") or "30")
 FREE_DELAY_SECONDS = int(get_setting("FREE_DELAY_SECONDS", "180") or "180")
