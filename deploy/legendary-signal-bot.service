@@ -1,0 +1,23 @@
+# Unit systemd per il bot parallelo "Pronostico Leggendario" (legendary_signal_bot.py).
+# Gira ACCANTO a oracle-live.service, non lo sostituisce e non ne tocca lo stato.
+# Installazione (sullo stesso VPS dove gia' gira oracle-live):
+#   sudo cp deploy/legendary-signal-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now legendary-signal-bot
+[Unit]
+Description=Legendary Signal Bot (parallelo, solo segnali admin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oracle
+WorkingDirectory=/opt/oracle-live
+ExecStart=/opt/oracle-live/.venv/bin/python /opt/oracle-live/legendary_signal_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
