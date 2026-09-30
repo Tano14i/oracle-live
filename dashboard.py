@@ -9,6 +9,7 @@ import streamlit as st
 from config import (
     PERFORMANCE_STARTING_BANKROLL,
     QUOTA,
+    QUOTA_2H_MOMENTUM,
     QUOTA_NEXT_GOAL,
     QUOTA_O05_HT,
     QUOTA_O15_HT,
@@ -19,6 +20,7 @@ MARKET_QUOTAS = {
     "OVER 0.5 HT": QUOTA_O05_HT,
     "OVER 1.5 HT": QUOTA_O15_HT,
     "NEXT GOAL LIVE": QUOTA_NEXT_GOAL,
+    "NEXT GOAL 2H MOMENTUM": QUOTA_2H_MOMENTUM,
 }
 
 # --- Bot control helpers (used by the Control Room tab) ---
@@ -98,6 +100,7 @@ MARKET_LABELS = {
     "HT_15": "OVER 1.5 HT",
     "HT_BOTH": "OVER 0.5 HT + OVER 1.5 HT",
     "NEXT_GOAL": "NEXT GOAL LIVE",
+    "MOMENTUM_2H": "NEXT GOAL 2H MOMENTUM",
     "HT_NEXT": "HT + NEXT GOAL",
     "OVER 0.5 HT": "OVER 0.5 HT",
     "OVER 1.5 HT": "OVER 1.5 HT",

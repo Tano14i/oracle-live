@@ -25,6 +25,7 @@ from difflib import SequenceMatcher
 import joblib
 import pandas as pd
 import requests
+import traceback
 import telebot
 from telebot import types
 
@@ -38,6 +39,11 @@ from config import (
     FREE_EVERY_N_APPROVED,
     HT_PRESSURE_WINDOW_ENABLED,
     HT_PRESSURE_WINDOW_MAX_MINUTE,
+    ENFORCE_MIN_QUOTA,
+    MOMENTUM_2H_ENABLED,
+    MOMENTUM_FOLLOWUP_MINUTES,
+    MOMENTUM_LOOKBACK_MINUTES,
+    QUOTA_2H_MOMENTUM,
     LOG_FILE_PATH,
     LIVE_TRAINING_DATA_PATH,
     MEMBERS_DB_PATH,
@@ -71,14 +77,28 @@ from oracle_prematch.settings import (
     PREMATCH_AUTO_COLLECT_PAGE_LIMIT,
 )
 
-from trainer import (
+# Il retrain (manuale e automatico) usa trainer_v2: split temporale, niente LEARNING nel
+# training, probabilita' calibrate. Prima importava trainer.py (v1) e dopo ogni retrain
+# ricaricava il modello v1 in memoria tenendo pero' la soglia v2: due cose incompatibili.
+from trainer_v2 import (
     CANDIDATE_MODEL_NAME,
     DATA_FILE as TRAINER_DATA_FILE,
     FEATURE_COLUMNS as TRAINER_FEATURE_COLUMNS,
     MIN_CANDIDATE_ROWS,
     MIN_PRODUCTION_ROWS,
     MODEL_NAME as TRAINER_MODEL_NAME,
-    train_oracle,
+    train_oracle_v2,
+)
+from momentum import (
+    FixtureStatsHistory,
+    breakeven_wr,
+    classify_momentum,
+    momentum_score,
+    partial_recommendation,
+    quota_gate,
+    second_half_gate,
+    second_half_tier,
+    skip_thresholds_for_quota,
 )
 
 required_settings = {
@@ -116,11 +136,19 @@ LIVE_TRAINING_COLUMNS = [
     "CornersAtOpen",
     "RedCardsAtOpen",
     "TitanPressureScore",
+    "ShotsOnGoalDelta10AtOpen",
+    "TotalShotsDelta10AtOpen",
+    "CornersDelta10AtOpen",
+    "MomentumScoreAtOpen",
+    "MomentumAtOpen",
+    "MomentumPost",
+    "MomentumPostScore",
     "Status",
     "Outcome",
     "CloseScore",
     "SettledTimeUTC",
 ]
+fixture_stats_history = FixtureStatsHistory()
 TITAN_PRESSURE_MODEL_PATH = os.path.join(BASE_DIR, "titan_pressure_model.pkl")
 
 # --- Modello v2 con soglia ottimale ---
@@ -156,6 +184,10 @@ nomi_unici_db = []
 oracle_brain = None
 titan_pressure_brain = None
 oracle_v2_threshold = V2_DEFAULT_THRESHOLD
+# True quando oracle_brain e' un CalibratedClassifierCV: le sue probabilita' sono reali,
+# quindi le soglie dei tier vanno lette rispetto al breakeven della quota, non ai vecchi
+# numeri (0.88/0.80/0.72) tarati su un Random Forest grezzo.
+model_is_calibrated = False
 membership_store = VipMembershipStore(MEMBERS_DB_PATH)
 last_vip_sync_ts = 0.0
 pending_free_timers = {}
@@ -189,6 +221,9 @@ TIER_GAMBLING = "GAMBLING"
 MARKET_OVER05_HT = "OVER 0.5 HT"
 MARKET_OVER15_HT = "OVER 1.5 HT"
 MARKET_NEXT_GOAL = "NEXT GOAL LIVE"
+# Market "47'": inizio ripresa, >= 4 tiri in porta, mai 0-0 in canale, quota minima 1.40.
+MARKET_2H_MOMENTUM = "NEXT GOAL 2H MOMENTUM"
+NEXT_GOAL_STYLE_MARKETS = {MARKET_NEXT_GOAL, MARKET_2H_MOMENTUM}
 SEPARATOR = "----------------------------"
 VIP_PLAN_CODE = "vip_monthly"
 VIP_PLAN_NAME = "Oracle VIP Monthly"
@@ -248,6 +283,7 @@ MARKET_PRESETS = {
     "HT_BOTH": {"label": "OVER 0.5 HT + OVER 1.5 HT", "markets": [MARKET_OVER05_HT, MARKET_OVER15_HT]},
     "NEXT_GOAL": {"label": MARKET_NEXT_GOAL, "markets": [MARKET_NEXT_GOAL]},
     "HT_NEXT": {"label": "HT + NEXT GOAL LIVE", "markets": [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]},
+    "MOMENTUM_2H": {"label": MARKET_2H_MOMENTUM, "markets": [MARKET_2H_MOMENTUM]},
 }
 DEFAULT_MARKET_MODE = "HT_NEXT"
 
@@ -255,6 +291,7 @@ MARKET_QUOTAS = {
     MARKET_OVER05_HT: QUOTA_O05_HT,
     MARKET_OVER15_HT: QUOTA_O15_HT,
     MARKET_NEXT_GOAL: QUOTA_NEXT_GOAL,
+    MARKET_2H_MOMENTUM: QUOTA_2H_MOMENTUM,
 }
 
 
@@ -508,11 +545,14 @@ def append_rolling_settled(market: str, league_name: str, minute_bucket: str, ou
             stats["rolling_settled"] = rolling[-300:]
 
 
-def get_rolling_bucket_stats(field: str, key: str, window: int) -> dict:
+def get_rolling_bucket_stats(field: str, key: str, window: int, max_age_days: int = 0) -> dict:
     rolling = stats.get("rolling_settled")
     if not key or not isinstance(rolling, list) or not rolling:
         return {"WIN": 0, "LOSS": 0}
 
+    cutoff = None
+    if max_age_days and max_age_days > 0:
+        cutoff = (now_utc() - timedelta(days=max_age_days)).isoformat()
     wins = 0
     losses = 0
     checked = 0
@@ -521,6 +561,8 @@ def get_rolling_bucket_stats(field: str, key: str, window: int) -> dict:
             continue
         if item.get(field) != key:
             continue
+        if cutoff is not None and str(item.get("time", "")) < cutoff:
+            break
         outcome = item.get("outcome")
         if outcome == "WIN":
             wins += 1
@@ -544,36 +586,47 @@ def should_skip_by_live_performance(market: str, league_name: str, minute_bucket
 
     # Soglie minime alzate (5->8, 4->6): con 10+ segnali/giorno un campione di 4-5
     # esiti e' rumore statistico e spegneva il market per il resto della giornata.
+    # Soglie derivate dal breakeven della quota del market, non fisse a 40/35%:
+    # con breakeven 57% (quota 1.75) il vecchio 40% lasciava passare segnali in perdita.
+    today_threshold, rolling_threshold = skip_thresholds_for_quota(get_market_quota(market))
+
     market_stats = get_settled_bucket_stats(analytics.get("settled_by_market"), market)
     market_total = market_stats["WIN"] + market_stats["LOSS"]
-    if market_total >= 8 and market_stats["WIN"] / max(1, market_total) < 0.40:
-        return True, f"market {market} under 40% today"
+    if market_total >= 8 and market_stats["WIN"] / max(1, market_total) < today_threshold:
+        return True, f"market {market} under {today_threshold:.0%} today"
 
+    # Finestra limitata nel tempo (14 giorni): gli shadow non alimentano il rolling, quindi
+    # senza limite un market spento non potrebbe piu' riaccendersi.
+    rolling_market = get_rolling_bucket_stats("market", market, 50, max_age_days=14)
+    rolling_total = rolling_market["WIN"] + rolling_market["LOSS"]
+    if rolling_total >= 30 and rolling_market["WIN"] / max(1, rolling_total) < rolling_threshold:
+        return True, f"market {market} rolling50 WR under breakeven ({rolling_threshold:.0%})"
+
+    # Lega e fascia minuto aggregano tutti i market: soglia generica (quota di config), non del market.
+    generic_threshold, _ = skip_thresholds_for_quota(QUOTA)
     league_stats = get_settled_bucket_stats(analytics.get("settled_by_league"), league_name)
     league_total = league_stats["WIN"] + league_stats["LOSS"]
-    if league_total >= 6 and league_stats["WIN"] / max(1, league_total) < 0.35:
-        return True, f"league {league_name} cold today"
+    if league_total >= 6 and league_stats["WIN"] / max(1, league_total) < generic_threshold:
+        return True, f"league {league_name} cold today (<{generic_threshold:.0%})"
 
     minute_stats = get_settled_bucket_stats(analytics.get("settled_by_minute_bucket"), minute_bucket)
     minute_total = minute_stats["WIN"] + minute_stats["LOSS"]
-    if minute_total >= 6 and minute_stats["WIN"] / max(1, minute_total) < 0.35:
-        return True, f"minute zone {minute_bucket} cold today"
+    if minute_total >= 6 and minute_stats["WIN"] / max(1, minute_total) < generic_threshold:
+        return True, f"minute zone {minute_bucket} cold today (<{generic_threshold:.0%})"
 
-    market_last_20 = get_rolling_bucket_stats("market", market, 20)
-    if check_negative_window(market_last_20, 8, 0.40):
-        return True, f"market {market} weak on last 20"
+    # Finestre brevi: stesse soglie "oggi" (breakeven - 15 punti), limitate a 14 giorni.
+    # Prima erano fisse a 0.40/0.42/0.33, tutte sotto il breakeven, e senza scadenza.
+    market_last_20 = get_rolling_bucket_stats("market", market, 20, max_age_days=14)
+    if check_negative_window(market_last_20, 8, today_threshold):
+        return True, f"market {market} weak on last 20 (<{today_threshold:.0%})"
 
-    market_last_50 = get_rolling_bucket_stats("market", market, 50)
-    if check_negative_window(market_last_50, 15, 0.42):
-        return True, f"market {market} weak on last 50"
+    league_last_20 = get_rolling_bucket_stats("league_name", league_name, 20, max_age_days=14)
+    if check_negative_window(league_last_20, 6, generic_threshold):
+        return True, f"league {league_name} weak on last 20 (<{generic_threshold:.0%})"
 
-    league_last_20 = get_rolling_bucket_stats("league_name", league_name, 20)
-    if check_negative_window(league_last_20, 6, 0.33):
-        return True, f"league {league_name} weak on last 20"
-
-    minute_last_20 = get_rolling_bucket_stats("minute_bucket", minute_bucket, 20)
-    if check_negative_window(minute_last_20, 6, 0.33):
-        return True, f"minute zone {minute_bucket} weak on last 20"
+    minute_last_20 = get_rolling_bucket_stats("minute_bucket", minute_bucket, 20, max_age_days=14)
+    if check_negative_window(minute_last_20, 6, generic_threshold):
+        return True, f"minute zone {minute_bucket} weak on last 20 (<{generic_threshold:.0%})"
 
     return False, ""
 
@@ -616,7 +669,7 @@ def format_rolling_overview() -> str:
 
 def format_market_rolling_overview() -> str:
     parts = []
-    for market_name in get_active_markets():
+    for market_name in get_routed_active_markets():
         parts.append(f"{market_name}: {summarize_wr_bucket(get_rolling_bucket_stats('market', market_name, 20))}")
     return " | ".join(parts) if parts else "n/a"
 def get_minute_bucket(minute_value: int) -> str:
@@ -630,7 +683,13 @@ def get_minute_bucket(minute_value: int) -> str:
         return "26-30"
     if minute_value <= 35:
         return "31-35"
-    return "36-44"
+    if minute_value <= 44:
+        return "36-44"
+    if minute_value <= 55:
+        return "45-55"
+    if minute_value <= 69:
+        return "56-69"
+    return "70+"
 
 
 def format_top_counts(values: dict, limit: int = 3) -> str:
@@ -994,11 +1053,12 @@ def get_active_markets():
 
 def get_routed_active_markets():
     markets = list(dict.fromkeys(get_active_markets()))
-    if not AUTO_MARKET_SWITCH_ENABLED:
-        return markets
     mode = get_market_mode()
-    if mode in {"NEXT_GOAL", "HT_NEXT"}:
-        return [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]
+    if AUTO_MARKET_SWITCH_ENABLED and mode in {"NEXT_GOAL", "HT_NEXT"}:
+        markets = [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]
+    # Il market 2H si aggiunge a qualsiasi modalita' che includa NEXT GOAL (o alla sua modalita' dedicata).
+    if MOMENTUM_2H_ENABLED and (MARKET_NEXT_GOAL in markets or mode == "MOMENTUM_2H") and MARKET_2H_MOMENTUM not in markets:
+        markets.append(MARKET_2H_MOMENTUM)
     return markets
 
 
@@ -1031,6 +1091,9 @@ def get_market_router_score(market: str, minute_value: int, total_goals: int) ->
         if minute_value <= 35:
             return 0.70
         return 0.20
+    if market == MARKET_2H_MOMENTUM:
+        # Nella sua finestra ha priorita' sul NEXT GOAL generico (che a 45-69' e' storicamente in perdita).
+        return 1.50 if 46 <= minute_value <= 55 and total_goals <= 3 else -1.0
     if market == MARKET_NEXT_GOAL:
         if minute_value <= 5:
             return 0.30
@@ -1632,6 +1695,8 @@ def release_process_lock() -> None:
 
 atexit.register(release_process_lock)
 def is_market_window(market: str, minute_value: int, total_goals: int) -> bool:
+    if market == MARKET_2H_MOMENTUM:
+        return 46 <= minute_value <= 55 and total_goals <= 3
     if market == MARKET_NEXT_GOAL:
         return 1 <= minute_value <= 85
     if market == MARKET_OVER15_HT:
@@ -1716,9 +1781,23 @@ def combine_team_metrics(home_metrics: dict, away_metrics: dict):
         "avg_ht_goals": round((home_metrics["avg_ht_goals"] + away_metrics["avg_ht_goals"]) / 2, 2),
     }
 
+def get_tier_prob_thresholds(market: str) -> tuple:
+    """(approved, caution, gambling). Con modello calibrato: breakeven della quota + margine.
+    Con modello grezzo (v1 o v2 non calibrato): i numeri storici."""
+    if model_is_calibrated:
+        be = breakeven_wr(get_market_quota(market))
+        return (min(0.95, be + 0.12), min(0.93, be + 0.06), min(0.90, be + 0.02))
+    if market == MARKET_OVER05_HT:
+        return (0.88, 0.80, 0.72)
+    if market == MARKET_OVER15_HT:
+        return (0.90, 0.84, 0.76)
+    return (0.82, 0.72, 0.64)
+
+
 def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, prob: float, metrics: dict):
     if not metrics or metrics["matches"] < 6:
         return None
+    thr_approved, thr_caution, thr_gambling = get_tier_prob_thresholds(market)
 
     avg_total_goals = metrics["avg_total_goals"]
     avg_ht_goals = metrics["avg_ht_goals"]
@@ -1732,17 +1811,17 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
             return None
         if min(home_ht, away_ht) < 0.56:
             return None
-        if prob >= 0.88 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.00:
+        if prob >= thr_approved and avg_total_goals >= 2.35 and avg_ht_goals >= 1.00:
             return {
                 "tier": TIER_APPROVED,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | 0-0 with time window still strong",
             }
-        if prob >= 0.80 and avg_total_goals >= 2.20 and avg_ht_goals >= 0.86:
+        if prob >= thr_caution and avg_total_goals >= 2.20 and avg_ht_goals >= 0.86:
             return {
                 "tier": TIER_CAUTION,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | setup still tradable",
             }
-        if prob >= 0.72 and avg_total_goals >= 2.08 and avg_ht_goals >= 0.78 and min(home_ht, away_ht) >= 0.52:
+        if prob >= thr_gambling and avg_total_goals >= 2.08 and avg_ht_goals >= 0.78 and min(home_ht, away_ht) >= 0.52:
             return {
                 "tier": TIER_GAMBLING,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | aggressive early HT value setup",
@@ -1756,17 +1835,17 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
             return None
         if min(home_ht, away_ht) < 0.72:
             return None
-        if prob >= 0.90 and avg_total_goals >= 2.65 and avg_ht_goals >= 1.25:
+        if prob >= thr_approved and avg_total_goals >= 2.65 and avg_ht_goals >= 1.25:
             return {
                 "tier": TIER_APPROVED,
                 "reason": f"Strong first-half pace {avg_ht_goals:.2f} | one goal already landed | high continuation setup",
             }
-        if prob >= 0.84 and avg_total_goals >= 2.48 and avg_ht_goals >= 1.14:
+        if prob >= thr_caution and avg_total_goals >= 2.48 and avg_ht_goals >= 1.14:
             return {
                 "tier": TIER_CAUTION,
                 "reason": f"One-goal HT setup with solid pace {avg_ht_goals:.2f} and total profile {avg_total_goals:.2f}",
             }
-        if prob >= 0.76 and avg_total_goals >= 2.34 and avg_ht_goals >= 1.04 and min(home_ht, away_ht) >= 0.66:
+        if prob >= thr_gambling and avg_total_goals >= 2.34 and avg_ht_goals >= 1.04 and min(home_ht, away_ht) >= 0.66:
             return {
                 "tier": TIER_GAMBLING,
                 "reason": f"One-goal HT setup with aggressive continuation value and pace {avg_ht_goals:.2f}",
@@ -1778,17 +1857,17 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
             return None
         if avg_total_goals < 2.20:
             return None
-        if prob >= 0.82 and avg_total_goals >= 2.70:
+        if prob >= thr_approved and avg_total_goals >= 2.70:
             return {
                 "tier": TIER_APPROVED,
                 "reason": f"Live next-goal pressure | model {prob:.2f} | total pace {avg_total_goals:.2f}",
             }
-        if prob >= 0.72 and avg_total_goals >= 2.45:
+        if prob >= thr_caution and avg_total_goals >= 2.45:
             return {
                 "tier": TIER_CAUTION,
                 "reason": f"Next-goal live setup | model {prob:.2f} | total pace {avg_total_goals:.2f}",
             }
-        if prob >= 0.64 and avg_total_goals >= 2.25:
+        if prob >= thr_gambling and avg_total_goals >= 2.25:
             return {
                 "tier": TIER_GAMBLING,
                 "reason": f"Aggressive next-goal value | model {prob:.2f} | total pace {avg_total_goals:.2f}",
@@ -2023,15 +2102,17 @@ def format_signal_message(
                 confirm_line = "\U0001F504 Confermato su " + str(cycles) + " rilevamenti\n"
             elif cycles >= 2:
                 confirm_line = "\U0001F504 Rilevato su " + str(cycles) + " scansioni\n"
-    min_quota = get_min_quota_for_tier(tier)
+    min_quota = get_min_quota_for_tier(tier, market)
     if live_odd is not None:
         if live_odd >= min_quota:
-            quota_line = "\U0001F4B0 Quota live: <b>" + str(live_odd) + "</b> \u2705 (min " + str(min_quota) + ")\n"
+            quota_line = "\U0001F4B0 Quota live: <b>" + str(live_odd) + "</b> \u2705 (min " + f"{min_quota:.2f}" + ")\n"
         else:
-            quota_line = "\U0001F4B0 Quota live: <b>" + str(live_odd) + "</b> \u26A0 sotto soglia, attendi " + str(min_quota) + "+\n"
+            quota_line = "\U0001F4B0 Quota live: <b>" + str(live_odd) + "</b> \u26A0 sotto soglia, attendi " + f"{min_quota:.2f}" + "+\n"
     else:
-        quota_line = "\U0001F4B0 Entra solo sopra quota <b>" + str(min_quota) + "</b>\n"
-    if market == MARKET_NEXT_GOAL:
+        quota_line = "\U0001F4B0 Entra solo sopra quota <b>" + f"{min_quota:.2f}" + "</b>\n"
+    if market == MARKET_2H_MOMENTUM:
+        mkt_header = emoji + " <b>NEXT GOAL 2H</b> \u26A1 momentum — <b>" + escape_html(tier) + "</b>"
+    elif market == MARKET_NEXT_GOAL:
         mkt_header = emoji + " <b>NEXT GOAL</b> — <b>" + escape_html(tier) + "</b>"
     else:
         mkt_header = emoji + " <b>" + escape_html(market) + "</b> — <b>" + escape_html(tier) + "</b>"
@@ -2747,8 +2828,8 @@ def format_ml_status() -> str:
     migrated_settled_rows = max(0, settled_rows - live_format_settled_rows)
 
     candidate_exists = os.path.exists(CANDIDATE_MODEL_NAME)
-    production_exists = os.path.exists(MODEL_PATH)
-    active_model = MODEL_PATH if production_exists else (CANDIDATE_MODEL_NAME if candidate_exists else "none")
+    production_exists = os.path.exists(TRAINER_MODEL_NAME)
+    active_model = TRAINER_MODEL_NAME if production_exists else (CANDIDATE_MODEL_NAME if candidate_exists else (MODEL_PATH if os.path.exists(MODEL_PATH) else "none"))
 
     last_retrain_total_rows = int(stats.get("last_retrain_total_rows", 0) or 0)
     last_retrain_settled_rows = int(stats.get("last_retrain_settled_rows", 0) or 0)
@@ -2814,10 +2895,11 @@ def run_retrain_from_bot() -> str:
     global oracle_brain
     global titan_pressure_brain
     global last_retrain_result
-
+    global oracle_v2_threshold
+    global model_is_calibrated
     try:
         with live_training_lock:
-            result = train_oracle()
+            result = train_oracle_v2()
     except Exception as exc:
         logger.exception("RETRAIN_ERROR | error=%s", exc)
         last_retrain_result = f"Error: {exc}"
@@ -2855,7 +2937,11 @@ def run_retrain_from_bot() -> str:
 
     if mode == "production":
         try:
-            oracle_brain = joblib.load(MODEL_PATH)
+            oracle_brain = joblib.load(model_path or V2_MODEL_PATH)
+            model_is_calibrated = hasattr(oracle_brain, "calibrated_classifiers_")
+            new_threshold = float(result.get("optimal_threshold", oracle_v2_threshold) or oracle_v2_threshold)
+            oracle_v2_threshold = new_threshold
+            log_event("RETRAIN_RELOAD", f"model={model_path} threshold={new_threshold}")
         except Exception as exc:
             logger.exception("RETRAIN_RELOAD_ERROR | error=%s", exc)
             last_retrain_result = f"Production saved but reload failed: {exc}"
@@ -2876,6 +2962,8 @@ def run_retrain_from_bot() -> str:
         validation_line = (
             f" | val acc {validation.get('accuracy', 0.0):.2f}"
             f" | val logloss {validation.get('log_loss', 0.0):.2f}"
+            f" | prec@thr {validation.get('precision_at_optimal', 0.0):.2f}"
+            f" | thr {result.get('optimal_threshold', 0.5)}"
         )
     last_retrain_result = f"{mode.upper()} | {rows} rows | {top_features}{validation_line}"
     with state_lock:
@@ -2895,10 +2983,18 @@ def run_retrain_from_bot() -> str:
     validation_block = ""
     if validation:
         validation_block = (
-            f"\n<b>Validation:</b> accuracy {validation.get('accuracy', 0.0):.3f}"
+            f"\n<b>Validation (split temporale, {html.escape(str(validation.get('calibration_method', 'n/a')))}):</b>"
+            f" accuracy {validation.get('accuracy', 0.0):.3f}"
             f" | log loss {validation.get('log_loss', 0.0):.3f}"
+            f" | precision@thr {validation.get('precision_at_optimal', 0.0):.3f}"
             f" | rows {validation.get('rows', 0)}"
+            f"\n<b>Soglia ottimale:</b> {result.get('optimal_threshold', 0.5)}"
         )
+        reliability = validation.get("reliability") or []
+        if reliability:
+            validation_block += "\n<b>Calibrazione (prob -&gt; WR reale):</b> " + " | ".join(
+                f"{r['bin']}: {r['real_wr']:.0%} (n={r['n']})" for r in reliability
+            )
 
     return (
         "<b>RETRAIN COMPLETED</b>\n\n"
@@ -3690,7 +3786,10 @@ def fetch_next_goal_live_odds(fixture_id: int, headers: dict, total_goals: int =
         return None
 
 
-def get_min_quota_for_tier(tier: str) -> float:
+def get_min_quota_for_tier(tier: str, market: str = "") -> float:
+    if market == MARKET_2H_MOMENTUM:
+        # Regola 47': mai sotto 1.40, qualunque sia il tier.
+        return float(QUOTA_2H_MOMENTUM)
     return {"APPROVED": 1.90, "CAUTION": 1.70, "GAMBLING": 1.75, "LEARNING": 1.75}.get(tier, 1.75)
 
 
@@ -3892,7 +3991,7 @@ def settle_missing_live_signals(seen_fixture_ids, headers: dict) -> None:
         status_short = fixture_state["status_short"]
         score = fixture_state["score"]
 
-        if market == MARKET_NEXT_GOAL:
+        if market in NEXT_GOAL_STYLE_MARKETS:
             start_total_goals = int(info.get("total_goals_at_open", 0) or 0)
             if total_goals > start_total_goals:
                 chiudi_scommessa(signal_key, True, score)
@@ -3902,6 +4001,85 @@ def settle_missing_live_signals(seen_fixture_ids, headers: dict) -> None:
             chiudi_scommessa(signal_key, True, score)
         elif is_first_half_closed(status_short, minute_value):
             chiudi_scommessa(signal_key, False, score)
+
+
+def update_live_training_fields(signal_key: str, fields: dict) -> None:
+    """Aggiorna colonne arbitrarie della riga del segnale (es. momentum post-apertura)."""
+    if not fields:
+        return
+    with live_training_lock:
+        ensure_live_training_dataset()
+        try:
+            df = pd.read_csv(LIVE_TRAINING_DATA_PATH, dtype={"CloseScore": "string", "SettledTimeUTC": "string"})
+        except Exception as exc:
+            print(f"Live training dataset read error: {exc}")
+            return
+        if "SignalKey" not in df.columns or df.empty:
+            return
+        mask = df["SignalKey"].astype(str) == str(signal_key)
+        if not mask.any():
+            return
+        for column, value in fields.items():
+            if column not in df.columns:
+                df[column] = pd.NA
+            if isinstance(value, str):
+                df[column] = df[column].astype("string")
+            df.loc[mask, column] = value
+        df.to_csv(LIVE_TRAINING_DATA_PATH, index=False)
+
+
+def maybe_send_momentum_followup(signal_key: str, info: dict, stats_payload, minute_value: int) -> None:
+    """Regola 47' di Mazza, misurata: N minuti dopo l'apertura si confrontano tiri e angoli con lo
+    snapshot di apertura. Se salgono -> parziale entro 75'/80' (quota >= minimo); se no -> solo
+    over totale. Un solo follow-up per segnale, e il dato finisce nel dataset (MomentumPost)."""
+    if not isinstance(info, dict) or info.get("momentum_followup_sent"):
+        return
+    if info.get("market") != MARKET_2H_MOMENTUM:
+        # La regola 75'/80' ha senso solo nel secondo tempo: un NEXT GOAL aperto al 20' non c'entra.
+        return
+    open_minute = int(info.get("open_minute", 0) or 0)
+    if open_minute <= 0 or int(minute_value) - open_minute < MOMENTUM_FOLLOWUP_MINUTES:
+        return
+    open_stats = info.get("open_stats")
+    if not isinstance(open_stats, dict) or not isinstance(stats_payload, dict):
+        return
+    delta = {
+        "shots_on_goal_delta": float(stats_payload.get("shots_on_goal", 0.0) or 0.0) - float(open_stats.get("shots_on_goal", 0.0) or 0.0),
+        "total_shots_delta": float(stats_payload.get("total_shots", 0.0) or 0.0) - float(open_stats.get("total_shots", 0.0) or 0.0),
+        "corners_delta": float(stats_payload.get("corners", 0.0) or 0.0) - float(open_stats.get("corners", 0.0) or 0.0),
+        "span_minutes": int(minute_value) - open_minute,
+    }
+    label = classify_momentum(delta, MOMENTUM_FOLLOWUP_MINUTES)
+    score_value = momentum_score(delta)
+    market = info.get("market", "")
+    min_quota = get_min_quota_for_tier(info.get("tier", ""), market)
+    text = partial_recommendation(label, int(minute_value), min_quota)
+    with state_lock:
+        info["momentum_followup_sent"] = True
+        info["momentum_post"] = label
+    update_live_training_fields(signal_key, {"MomentumPost": label, "MomentumPostScore": score_value})
+    log_event("MOMENTUM_FOLLOWUP", f"key={signal_key} minute={minute_value} label={label} score={score_value} delta={delta}")
+    if info.get("shadow_only"):
+        return
+    body = (
+        "\u23F1 <b>Follow-up momentum</b> — " + escape_html(str(info.get("match_up", "")))
+        + "\n" + escape_html(text)
+        + "\n\U0001F4CA tiri in porta +" + str(int(delta["shots_on_goal_delta"]))
+        + " | tiri +" + str(int(delta["total_shots_delta"]))
+        + " | angoli +" + str(int(delta["corners_delta"]))
+        + " negli ultimi " + str(delta["span_minutes"]) + "'"
+    )
+    for delivery in info.get("delivery_targets") or []:
+        chat_target = delivery.get("chat_id")
+        if not chat_target or delivery.get("audience") in {"admin_premium", "free"}:
+            continue
+        try:
+            bot.send_message(chat_target, body, parse_mode="HTML", reply_to_message_id=delivery.get("message_id"))
+        except Exception:
+            try:
+                bot.send_message(chat_target, body, parse_mode="HTML")
+            except Exception as exc2:
+                log_event("MOMENTUM_FOLLOWUP_FAIL", f"chat={chat_target} err={exc2}")
 
 
 def chiudi_scommessa(signal_key: str, vinta: bool, score_finale: str) -> None:
@@ -3999,8 +4177,8 @@ def build_market_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("MARKET O0.5 HT", "MARKET O1.5 HT")
     kb.add("MARKET BOTH HT", "MARKET NEXT GOAL")
-    kb.add("MARKET HT + NEXT", "MARKET ATTUALE")
-    kb.add("INDIETRO")
+    kb.add("MARKET HT + NEXT", "MARKET 2H MOMENTUM")
+    kb.add("MARKET ATTUALE", "INDIETRO")
     return kb
 
 
@@ -4332,12 +4510,18 @@ def radar_loop() -> None:
                     signal_key = get_signal_key(fixture_id, market)
                     pending_signal = stats["monitor_risultati"].get(signal_key)
                     if pending_signal and pending_signal.get("status") == "pending":
-                        if market == MARKET_NEXT_GOAL:
+                        if market in NEXT_GOAL_STYLE_MARKETS:
                             start_total_goals = int(pending_signal.get("total_goals_at_open", 0) or 0)
                             if total_goals > start_total_goals:
                                 chiudi_scommessa(signal_key, True, score)
                             elif status_short in {"FT", "AET", "PEN"}:
                                 chiudi_scommessa(signal_key, False, score)
+                            elif status_short in {"1H", "2H"}:
+                                # Rilettura del momentum N minuti dopo l'apertura (regola 47').
+                                try:
+                                    maybe_send_momentum_followup(signal_key, pending_signal, fetch_fixture_stats(fixture_id, headers), minute_value)
+                                except Exception as follow_exc:
+                                    log_event("MOMENTUM_FOLLOWUP_ERROR", f"key={signal_key} err={follow_exc}")
                         else:
                             if is_market_winner(market, total_goals):
                                 chiudi_scommessa(signal_key, True, score)
@@ -4346,21 +4530,34 @@ def radar_loop() -> None:
                         continue
 
 
-                if oracle_brain is None:
+                brain = oracle_brain  # snapshot: il retrain puo' sostituirlo a meta' scansione
+                if brain is None:
                     scan_debug["no_model"] += len(prioritized_markets)
                     continue
 
                 stats_payload = fetch_fixture_stats(fixture_id, headers)
+                # Storico per fixture -> delta negli ultimi N minuti (feature momentum, calcolata
+                # PRIMA dell'apertura quindi lecita per il modello).
+                fixture_stats_history.record(fixture_id, minute_value, stats_payload)
+                momentum_delta = fixture_stats_history.delta(fixture_id, minute_value, MOMENTUM_LOOKBACK_MINUTES)
+                momentum_label_at_open = classify_momentum(momentum_delta, MOMENTUM_LOOKBACK_MINUTES)
+                momentum_score_at_open = momentum_score(momentum_delta)
                 shots_on_goal_at_open = float(stats_payload.get("shots_on_goal", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 total_shots_at_open = float(stats_payload.get("total_shots", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 corners_at_open = float(stats_payload.get("corners", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 red_cards_at_open = float(stats_payload.get("red_cards", 0.0) or 0.0) if isinstance(stats_payload, dict) else 0.0
                 dna = combined_metrics["avg_total_goals"]
-                model_feature_columns = list(getattr(oracle_brain, "feature_names_in_", TRAINER_FEATURE_COLUMNS))
+                model_feature_columns = list(getattr(brain, "feature_names_in_", TRAINER_FEATURE_COLUMNS))
 
                 for market in prioritized_markets:
                     signal_key = get_signal_key(fixture_id, market)
                     if signal_key in stats["segnali_inviati"]:
+                        scan_debug["pending_or_sent"] += 1
+                        continue
+                    # Anche gli shadow pendenti non vanno riaperti a ogni scansione (prima
+                    # generavano righe duplicate nel dataset e resettavano lo snapshot di apertura).
+                    pending_entry = stats["monitor_risultati"].get(signal_key)
+                    if isinstance(pending_entry, dict) and pending_entry.get("status") == "pending":
                         scan_debug["pending_or_sent"] += 1
                         continue
                     if opened_primary_signal:
@@ -4385,121 +4582,149 @@ def radar_loop() -> None:
                         "CornersAtOpen": corners_at_open,
                         "RedCardsAtOpen": red_cards_at_open,
                         "TitanPressureScore": titan_pressure_score,
+                        "ShotsOnGoalDelta10AtOpen": float(momentum_delta.get("shots_on_goal_delta", 0.0)),
+                        "TotalShotsDelta10AtOpen": float(momentum_delta.get("total_shots_delta", 0.0)),
+                        "CornersDelta10AtOpen": float(momentum_delta.get("corners_delta", 0.0)),
+                        "MomentumScoreAtOpen": momentum_score_at_open,
                     }
                     x_input = pd.DataFrame([[model_feature_values.get(column, 0.0) for column in model_feature_columns]], columns=model_feature_columns)
-                    prob = oracle_brain.predict_proba(x_input)[0][1]
-                    market_in_window = is_market_window(market, minute_value, total_goals)
-                    if (
-                        not market_in_window
-                        and HT_PRESSURE_WINDOW_ENABLED
-                        and market == MARKET_OVER05_HT
-                        and total_goals == 0
-                        and 20 < minute_value <= HT_PRESSURE_WINDOW_MAX_MINUTE
-                        and isinstance(stats_payload, dict)
-                    ):
-                        # Finestra estesa oltre il 20': solo con pressione live forte,
-                        # da attivare dopo conferma dei dati shadow (analyze_shadow_signals.py)
-                        ext_sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
-                        ext_gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
-                        if ext_sib >= 4 and ext_gks >= 2:
-                            market_in_window = True
-                            log_event("HT_PRESSURE_WINDOW", f"fid={fixture_id} min={minute_value} sib={ext_sib} gks={ext_gks}")
-                    ht_threshold_bonus = 0.0
-                    xg_threshold_bonus = 0.0
-                    xg_rate = get_xg_rate(stats_payload, minute_value)
-                    if market == MARKET_NEXT_GOAL:
-                        # Bonus soglia xG calcolato PRIMA del check soglia (prima veniva
-                        # assegnato dopo lo skip, quindi non aveva mai effetto)
-                        if xg_rate >= 0.030:
-                            xg_threshold_bonus = -0.05
-                            log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.05")
-                        elif xg_rate >= 0.025:
-                            xg_threshold_bonus = -0.03
-                            log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.03")
-                    if market == MARKET_OVER05_HT and isinstance(stats_payload, dict):
-                        sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
-                        gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
-                        xgr = get_xg_rate(stats_payload, minute_value)
-                        if sib >= 6 and gks >= 3:
-                            ht_threshold_bonus = -0.06
-                            log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " gks=" + str(gks) + " b=-0.06")
-                        elif sib >= 4 and gks >= 2:
-                            ht_threshold_bonus = -0.04
-                            log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " gks=" + str(gks) + " b=-0.04")
-                        elif sib >= 3 and xgr >= 0.025:
-                            ht_threshold_bonus = -0.02
-                            log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " xgr=" + str(xgr) + " b=-0.02")
-                    effective_threshold = oracle_v2_threshold + (xg_threshold_bonus if market == MARKET_NEXT_GOAL else ht_threshold_bonus)
-                    below_threshold = bool(market_in_window and prob < effective_threshold)
-                    if below_threshold:
-                        clear_pending_signal_tracker(signal_key)
-                        log_event("V2_THRESHOLD_SHADOW", "fid=" + str(fixture_id) + " mkt=" + str(market) + " prob=" + str(round(prob,3)) + " thr=" + str(round(effective_threshold,2)))
-                    if not market_in_window:
-                        clear_pending_signal_tracker(signal_key)
-                        assessment = evaluate_prewindow_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
-                        if not assessment:
-                            scan_debug["market_window"] += 1
+                    prob = brain.predict_proba(x_input)[0][1]
+                    if market == MARKET_2H_MOMENTUM:
+                        # Logica "47'": inizio ripresa, >= 4 tiri in porta, < 4 gol. Lo 0-0 non va in
+                        # canale (base rate 86% < breakeven ~91% a quota 1.10): solo shadow/LEARNING.
+                        gate_ok, gate_reason, gate_shadow = second_half_gate(minute_value, total_goals, shots_on_goal_at_open, score)
+                        if not gate_ok:
+                            clear_pending_signal_tracker(signal_key)
+                            if 46 <= minute_value <= 55:
+                                scan_debug["market_window"] += 1
+                                log_event("MOMENTUM_2H_GATE_SKIP", f"fixture_id={fixture_id} minute={minute_value} score={score} reason={gate_reason}")
                             continue
-                        shadow_only = True
-                        log_event("PREWINDOW_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} prob={prob:.2f} avg_ht={combined_metrics['avg_ht_goals']:.2f} avg_total={combined_metrics['avg_total_goals']:.2f} home_ht={combined_metrics['home_avg_ht_goals']:.2f} away_ht={combined_metrics['away_avg_ht_goals']:.2f}")
-                    elif below_threshold:
-                        # Il modello sotto soglia esclude la pubblicazione, non la raccolta:
-                        # prima questi candidati venivano scartati e il dato andava perso.
-                        assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
-                        if not assessment:
-                            assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
-                        if not assessment:
-                            scan_debug["candidate_failed"] += 1
+                        other_ng = stats["monitor_risultati"].get(get_signal_key(fixture_id, MARKET_NEXT_GOAL))
+                        if isinstance(other_ng, dict) and other_ng.get("status") == "pending" and not other_ng.get("shadow_only"):
+                            # Un NEXT GOAL pubblico e' gia' aperto sulla stessa partita: si chiuderebbero
+                            # sullo stesso gol, raddoppiando l'esposizione.
+                            log_event("MOMENTUM_2H_DUP_SKIP", f"fixture_id={fixture_id} minute={minute_value} reason=next goal already pending")
                             continue
-                        shadow_only = True
+                        base_tier = second_half_tier(momentum_label_at_open, TIER_CAUTION, TIER_GAMBLING)
+                        shadow_only = bool(gate_shadow)
+                        assessment = {
+                            "tier": TIER_LEARNING if shadow_only else base_tier,
+                            "reason": f"{gate_reason} | momentum {momentum_label_at_open} ({momentum_score_at_open}) | model {prob:.2f}",
+                        }
+                        log_event("MOMENTUM_2H_CANDIDATE", f"fixture_id={fixture_id} minute={minute_value} score={score} sog={shots_on_goal_at_open} momentum={momentum_label_at_open} shadow={shadow_only} prob={prob:.3f}")
                     else:
-                        shadow_only = False
-                        assessment = evaluate_signal_candidate(market, minute_value, total_goals, prob, combined_metrics)
-                        log_event("PRESSURE_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} titan_prob={(titan_pressure_prob if titan_pressure_prob is not None else -1):.2f} titan_score={titan_soft.get('score', 0)} shots={shots_on_goal_at_open}/{total_shots_at_open} corners={corners_at_open}")
-                        pressure_alert_reason = None
-                        live_pressure_available = has_live_pressure_data(stats_payload)
-                        if not live_pressure_available:
-                            if market == MARKET_OVER05_HT and total_goals == 0 and prob >= 0.78 and combined_metrics["avg_ht_goals"] >= 0.92 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.62:
-                                pressure_alert_reason = f"risky early HT pressure alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
-                            elif market == MARKET_OVER15_HT and total_goals == 1 and prob >= 0.80 and combined_metrics["avg_ht_goals"] >= 1.08 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.72:
-                                pressure_alert_reason = f"risky early HT continuation alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
-                        if pressure_alert_reason is None and titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
-                            pressure_alert_reason = f"titan pressure alert {titan_pressure_prob:.2f}"
-                        elif pressure_alert_reason is None and titan_soft.get("score", 0) >= 3:
-                            pressure_alert_reason = titan_soft.get("label", "titan pressure alert")
-                        if pressure_alert_reason:
-                            assessment = {"tier": TIER_CAUTION, "reason": pressure_alert_reason}
-                            log_event("SIGNAL_PRESSURE_ALERT", f"fixture_id={fixture_id} market={market} reason={pressure_alert_reason}")
-                        else:
-                            if market == MARKET_NEXT_GOAL:
-                                # Filtro cecchino: score, minuto, total goals
-                                ng_skip, ng_reason = should_skip_next_goal_by_context(minute_value, total_goals, score)
-                                if ng_skip:
-                                    scan_debug["candidate_failed"] += 1
-                                    clear_pending_signal_tracker(signal_key)
-                                    log_event("NG_CONTEXT_SKIP", f"fixture_id={fixture_id} minute={minute_value} score={score} reason={ng_reason}")
-                                    continue
-                                if xg_rate > 0.0 and xg_rate < 0.010 and minute_value >= 15:
-                                    scan_debug["candidate_failed"] += 1
-                                    clear_pending_signal_tracker(signal_key)
-                                    log_event("NG_XG_SKIP", "fid=" + str(fixture_id) + " min=" + str(minute_value) + " xgr=" + str(xg_rate))
-                                    continue
-                                pending_cycles = register_pending_signal_tracker(signal_key, minute_value, total_goals, prob)
-                                if not assessment:
-                                    # La persistenza integra il tiering base invece di sostituirlo:
-                                    # l'assegnazione incondizionata scartava sempre il risultato di
-                                    # evaluate_signal_candidate e nessun NEXT GOAL usciva senza 3+ cicli.
-                                    assessment = evaluate_pending_next_goal_candidate(minute_value, total_goals, prob, combined_metrics, pending_cycles, titan_pressure_prob, titan_soft)
-                                    if assessment:
-                                        log_event("SIGNAL_PENDING_PROMOTED", f"fixture_id={fixture_id} market={market} cycles={pending_cycles} tier={assessment['tier']} prob={prob:.2f}")
+                        market_in_window = is_market_window(market, minute_value, total_goals)
+                        if (
+                            not market_in_window
+                            and HT_PRESSURE_WINDOW_ENABLED
+                            and market == MARKET_OVER05_HT
+                            and total_goals == 0
+                            and 20 < minute_value <= HT_PRESSURE_WINDOW_MAX_MINUTE
+                            and isinstance(stats_payload, dict)
+                        ):
+                            # Finestra estesa oltre il 20': solo con pressione live forte,
+                            # da attivare dopo conferma dei dati shadow (analyze_shadow_signals.py)
+                            ext_sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
+                            ext_gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
+                            if ext_sib >= 4 and ext_gks >= 2:
+                                market_in_window = True
+                                log_event("HT_PRESSURE_WINDOW", f"fid={fixture_id} min={minute_value} sib={ext_sib} gks={ext_gks}")
+                        ht_threshold_bonus = 0.0
+                        xg_threshold_bonus = 0.0
+                        xg_rate = get_xg_rate(stats_payload, minute_value)
+                        if market == MARKET_NEXT_GOAL:
+                            # Bonus soglia xG calcolato PRIMA del check soglia (prima veniva
+                            # assegnato dopo lo skip, quindi non aveva mai effetto)
+                            if xg_rate >= 0.030:
+                                xg_threshold_bonus = -0.05
+                                log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.05")
+                            elif xg_rate >= 0.025:
+                                xg_threshold_bonus = -0.03
+                                log_event("NG_XG_BONUS", "fid=" + str(fixture_id) + " xgr=" + str(xg_rate) + " b=-0.03")
+                        if market == MARKET_OVER05_HT and isinstance(stats_payload, dict):
+                            sib = float(stats_payload.get("shots_insidebox", 0.0) or 0.0)
+                            gks = float(stats_payload.get("goalkeeper_saves", 0.0) or 0.0)
+                            xgr = get_xg_rate(stats_payload, minute_value)
+                            if sib >= 6 and gks >= 3:
+                                ht_threshold_bonus = -0.06
+                                log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " gks=" + str(gks) + " b=-0.06")
+                            elif sib >= 4 and gks >= 2:
+                                ht_threshold_bonus = -0.04
+                                log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " gks=" + str(gks) + " b=-0.04")
+                            elif sib >= 3 and xgr >= 0.025:
+                                ht_threshold_bonus = -0.02
+                                log_event("HT_PRESSURE_BONUS", "fid=" + str(fixture_id) + " sib=" + str(sib) + " xgr=" + str(xgr) + " b=-0.02")
+                        effective_threshold = oracle_v2_threshold + (xg_threshold_bonus if market == MARKET_NEXT_GOAL else ht_threshold_bonus)
+                        below_threshold = bool(market_in_window and prob < effective_threshold)
+                        if below_threshold:
+                            clear_pending_signal_tracker(signal_key)
+                            log_event("V2_THRESHOLD_SHADOW", "fid=" + str(fixture_id) + " mkt=" + str(market) + " prob=" + str(round(prob,3)) + " thr=" + str(round(effective_threshold,2)))
+                        if not market_in_window:
+                            clear_pending_signal_tracker(signal_key)
+                            assessment = evaluate_prewindow_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
                             if not assessment:
-                                assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                                scan_debug["market_window"] += 1
+                                continue
+                            shadow_only = True
+                            log_event("PREWINDOW_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} prob={prob:.2f} avg_ht={combined_metrics['avg_ht_goals']:.2f} avg_total={combined_metrics['avg_total_goals']:.2f} home_ht={combined_metrics['home_avg_ht_goals']:.2f} away_ht={combined_metrics['away_avg_ht_goals']:.2f}")
+                        elif below_threshold:
+                            # Il modello sotto soglia esclude la pubblicazione, non la raccolta:
+                            # prima questi candidati venivano scartati e il dato andava perso.
+                            assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
                             if not assessment:
                                 assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
                             if not assessment:
                                 scan_debug["candidate_failed"] += 1
                                 continue
-                            shadow_only = assessment.get("tier") == TIER_LEARNING
+                            shadow_only = True
+                        else:
+                            shadow_only = False
+                            assessment = evaluate_signal_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                            log_event("PRESSURE_CHECK", f"fixture_id={fixture_id} market={market} minute={minute_value} score={score} titan_prob={(titan_pressure_prob if titan_pressure_prob is not None else -1):.2f} titan_score={titan_soft.get('score', 0)} shots={shots_on_goal_at_open}/{total_shots_at_open} corners={corners_at_open}")
+                            pressure_alert_reason = None
+                            live_pressure_available = has_live_pressure_data(stats_payload)
+                            if not live_pressure_available:
+                                if market == MARKET_OVER05_HT and total_goals == 0 and prob >= 0.78 and combined_metrics["avg_ht_goals"] >= 0.92 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.62:
+                                    pressure_alert_reason = f"risky early HT pressure alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
+                                elif market == MARKET_OVER15_HT and total_goals == 1 and prob >= 0.80 and combined_metrics["avg_ht_goals"] >= 1.08 and min(combined_metrics["home_avg_ht_goals"], combined_metrics["away_avg_ht_goals"]) >= 0.72:
+                                    pressure_alert_reason = f"risky early HT continuation alert | model {prob:.2f} | HT pace {combined_metrics['avg_ht_goals']:.2f} | high-risk profile"
+                            if pressure_alert_reason is None and titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
+                                pressure_alert_reason = f"titan pressure alert {titan_pressure_prob:.2f}"
+                            elif pressure_alert_reason is None and titan_soft.get("score", 0) >= 3:
+                                pressure_alert_reason = titan_soft.get("label", "titan pressure alert")
+                            if pressure_alert_reason:
+                                assessment = {"tier": TIER_CAUTION, "reason": pressure_alert_reason}
+                                log_event("SIGNAL_PRESSURE_ALERT", f"fixture_id={fixture_id} market={market} reason={pressure_alert_reason}")
+                            else:
+                                if market == MARKET_NEXT_GOAL:
+                                    # Filtro cecchino: score, minuto, total goals
+                                    ng_skip, ng_reason = should_skip_next_goal_by_context(minute_value, total_goals, score)
+                                    if ng_skip:
+                                        scan_debug["candidate_failed"] += 1
+                                        clear_pending_signal_tracker(signal_key)
+                                        log_event("NG_CONTEXT_SKIP", f"fixture_id={fixture_id} minute={minute_value} score={score} reason={ng_reason}")
+                                        continue
+                                    if xg_rate > 0.0 and xg_rate < 0.010 and minute_value >= 15:
+                                        scan_debug["candidate_failed"] += 1
+                                        clear_pending_signal_tracker(signal_key)
+                                        log_event("NG_XG_SKIP", "fid=" + str(fixture_id) + " min=" + str(minute_value) + " xgr=" + str(xg_rate))
+                                        continue
+                                    pending_cycles = register_pending_signal_tracker(signal_key, minute_value, total_goals, prob)
+                                    if not assessment:
+                                        # La persistenza integra il tiering base invece di sostituirlo:
+                                        # l'assegnazione incondizionata scartava sempre il risultato di
+                                        # evaluate_signal_candidate e nessun NEXT GOAL usciva senza 3+ cicli.
+                                        assessment = evaluate_pending_next_goal_candidate(minute_value, total_goals, prob, combined_metrics, pending_cycles, titan_pressure_prob, titan_soft)
+                                        if assessment:
+                                            log_event("SIGNAL_PENDING_PROMOTED", f"fixture_id={fixture_id} market={market} cycles={pending_cycles} tier={assessment['tier']} prob={prob:.2f}")
+                                if not assessment:
+                                    assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                                if not assessment:
+                                    assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                                if not assessment:
+                                    scan_debug["candidate_failed"] += 1
+                                    continue
+                                shadow_only = assessment.get("tier") == TIER_LEARNING
                     clear_pending_signal_tracker(signal_key)
                     tier = assessment["tier"]
                     reason = assessment["reason"]
@@ -4508,7 +4733,7 @@ def radar_loop() -> None:
                     # Quota reale all'apertura, recuperata anche per gli shadow: senza di essa
                     # ogni ROI resta un'ipotesi basata sulla quota fissa di config.
                     live_odd = None
-                    if market == MARKET_NEXT_GOAL:
+                    if market in NEXT_GOAL_STYLE_MARKETS:
                         live_odd = fetch_next_goal_live_odds(fixture_id, headers, total_goals)
 
                     if not shadow_only:
@@ -4547,6 +4772,17 @@ def radar_loop() -> None:
                                 reason = f"{reason} | {titan_reason}" if reason and titan_reason else (titan_reason or reason)
                                 log_event("SIGNAL_PROMOTED", f"fixture_id={fixture_id} market={market} from={original_tier} to={tier} reason={titan_reason}")
 
+                        # Regola quota minima (era solo scritta nel messaggio, mai applicata), valutata
+                        # sul tier DEFINITIVO: se il book paga meno del minimo il segnale resta shadow.
+                        if market in NEXT_GOAL_STYLE_MARKETS:
+                            quota_ok, quota_reason = quota_gate(live_odd, get_min_quota_for_tier(tier, market), ENFORCE_MIN_QUOTA)
+                            if not quota_ok:
+                                shadow_only = True
+                                tier = TIER_LEARNING
+                                reason = f"{reason} | quota gate: {quota_reason}" if reason else f"quota gate: {quota_reason}"
+                                log_event("QUOTA_GATE_SHADOW", f"fixture_id={fixture_id} market={market} minute={minute_value} {quota_reason}")
+
+                    if not shadow_only:
                         with state_lock:
                             stats["segnali_inviati"].append(signal_key)
                         increment_analytics("signals_total")
@@ -4610,6 +4846,13 @@ def radar_loop() -> None:
                             "shadow_only": shadow_only,
                             "total_goals_at_open": total_goals,
                             "open_odd": live_odd,
+                            "open_minute": minute_value,
+                            "open_stats": {
+                                "shots_on_goal": shots_on_goal_at_open,
+                                "total_shots": total_shots_at_open,
+                                "corners": corners_at_open,
+                            },
+                            "momentum_followup_sent": False,
                         }
                     append_live_training_row({
                         "SignalKey": signal_key,
@@ -4640,6 +4883,13 @@ def radar_loop() -> None:
                         "CornersAtOpen": corners_at_open,
                         "RedCardsAtOpen": red_cards_at_open,
                         "TitanPressureScore": titan_pressure_score,
+                        "ShotsOnGoalDelta10AtOpen": float(momentum_delta.get("shots_on_goal_delta", 0.0)),
+                        "TotalShotsDelta10AtOpen": float(momentum_delta.get("total_shots_delta", 0.0)),
+                        "CornersDelta10AtOpen": float(momentum_delta.get("corners_delta", 0.0)),
+                        "MomentumScoreAtOpen": momentum_score_at_open,
+                        "MomentumAtOpen": momentum_label_at_open,
+                        "MomentumPost": "",
+                        "MomentumPostScore": "",
                         "Status": "pending",
                         "Outcome": "",
                         "CloseScore": "",
@@ -4679,13 +4929,14 @@ def radar_loop() -> None:
                 f"shadow_opened={scan_debug['shadow_opened']} "
             ))
             settle_missing_live_signals(seen_fixture_ids, headers)
+            fixture_stats_history.prune()
             prune_settled_signals()
             clean_sent_signals()
             salva_dati_web()
             time.sleep(40)
         except Exception as exc:
             print(f"Loop error: {exc}")
-            log_event("RADAR_ERROR", str(exc))
+            log_event("RADAR_ERROR", f"{exc} | {traceback.format_exc(limit=3)}")
             time.sleep(15)
 
 
@@ -5115,6 +5366,14 @@ def market_ht_next_cmd(message):
         return
     label = set_market_mode("HT_NEXT")
     bot.send_message(message.chat.id, f"Market updated: {label}")
+
+
+@bot.message_handler(func=lambda message: message.text == "MARKET 2H MOMENTUM")
+def market_2h_momentum_cmd(message):
+    if not require_admin_access(message):
+        return
+    label = set_market_mode("MOMENTUM_2H")
+    bot.send_message(message.chat.id, f"Market updated: {label}")
 if __name__ == "__main__":
     print("Starting Oracle system...")
     if not acquire_process_lock():
@@ -5123,7 +5382,8 @@ if __name__ == "__main__":
         raise SystemExit(0)
     try:
         oracle_brain = joblib.load(V2_MODEL_PATH)
-        print("AI model v2 loaded.")
+        model_is_calibrated = hasattr(oracle_brain, "calibrated_classifiers_")
+        print("AI model v2 loaded." + (" (calibrated)" if model_is_calibrated else ""))
         log_event("BOOT", "Model v2 loaded successfully")
         try:
             with open(V2_THRESHOLD_PATH, "r") as _f:

@@ -72,6 +72,36 @@ Ogni segnale, reale o shadow, registra in `live_training_data.csv` la colonna `O
 
 `chiudi_scommessa` usa `OpenOdd` per il P/L quando e' valorizzata, e ricade sulla quota di config solo se manca. Senza questo dato ogni ROI del bot resta un'ipotesi: una strategia al 67% di win rate va in pari solo da quota 1.49 in su, e va verificato che il book la paghi davvero.
 
+### Market `NEXT GOAL 2H MOMENTUM` (logica "47'")
+
+Entra a inizio ripresa (46'-55') e si chiude come NEXT GOAL (WIN al primo gol dopo l'apertura). Regole, tutte in `momentum.py`:
+
+- almeno **4 tiri in porta totali** all'apertura e meno di 4 gol in campo;
+- **mai 0-0 in canale**: partendo da 0-0 all'intervallo un gol nel secondo tempo arriva nell'86% dei casi contro il 90.6% con qualsiasi altro punteggio, e a quota ~1.10 (breakeven 90.9%) e' in perdita. Lo 0-0 viene aperto solo come shadow `LEARNING` per raccogliere dati;
+- tier iniziale dal **momentum** (delta tiri/angoli negli ultimi `MOMENTUM_LOOKBACK_MINUTES`): in salita -> `CAUTION`, piatto -> `GAMBLING`. Il modello ML non decide questo market finche' non ha righe proprie;
+- **quota minima 1.40** (`QUOTA_2H_MOMENTUM`): sotto, il segnale resta shadow;
+- **follow-up** dopo `MOMENTUM_FOLLOWUP_MINUTES` minuti: il bot confronta tiri e angoli con lo snapshot di apertura e risponde al messaggio del segnale con "parziale entro 75'/80' se quota >= minimo" oppure "solo over totale". Il verdetto finisce nel dataset (`MomentumPost`, `MomentumPostScore`) cosi' si potra' misurare se il parziale conviene davvero.
+
+Si attiva con `MOMENTUM_2H_ENABLED=1` (default) in ogni modalita' che include NEXT GOAL, oppure da solo con `MARKET 2H MOMENTUM`.
+
+### Regola quota minima applicata (`ENFORCE_MIN_QUOTA`)
+
+Il minimo per tier (1.90 APPROVED, 1.70 CAUTION, 1.75 GAMBLING) era scritto nel messaggio ma mai applicato: un NEXT GOAL con quota live 1.30 veniva pubblicato lo stesso. Ora, se la quota live e' nota e sotto il minimo, il segnale va in shadow e la riga riporta `quota gate` nel motivo. Con quota ignota si pubblica con l'avviso.
+
+### Skip adattivo agganciato al breakeven
+
+`should_skip_by_live_performance` spegneva un market sotto il 40% e una lega sotto il 35%, cioe' molto sotto il breakeven (57.1% a quota 1.75): tra il 40% e il 57% il bot continuava a mandare segnali in perdita. Le soglie ora derivano dalla quota del market (`skip_thresholds_for_quota`): oggi -> breakeven − 15 punti su almeno 8 esiti; rolling -> breakeven − 3 punti su almeno 30 esiti degli ultimi 50. Lega e fascia minuto aggregano tutti i market, quindi usano la soglia della quota generica (`QUOTA`). Tutte le finestre rolling guardano solo gli ultimi 14 giorni: gli shadow non alimentano il rolling, e senza scadenza un market spento non si sarebbe piu' riacceso.
+
+### Feature momentum nel modello
+
+Le feature erano tutte fotografie all'apertura (`...AtOpen`). Il bot ora tiene uno storico stats per fixture (`FixtureStatsHistory`) e registra `ShotsOnGoalDelta10AtOpen`, `TotalShotsDelta10AtOpen`, `CornersDelta10AtOpen`, `MomentumScoreAtOpen`, `MomentumAtOpen`. Per le righe vecchie che non le hanno il trainer le riempie a 0.
+
+### Trainer v2 in produzione, probabilita' calibrate
+
+`oracle_live.py` importava `trainer.py` (split casuale, LEARNING nel training, nessuna calibrazione) e dopo ogni retrain ricaricava quel modello in memoria tenendo pero' la soglia v2: due cose incompatibili. Ora il retrain (manuale `/retrain` e automatico) usa `trainer_v2.py`, ricarica `oracle_brain_v2.pkl` e aggiorna la soglia. Il modello e' avvolto in `CalibratedClassifierCV` (sigmoid sotto 300 righe, isotonic sopra) e il report di retrain mostra la **reliability table** (probabilita' predetta -> WR reale per bin): e' l'unico modo per sapere se un "0.80" vale davvero l'80%. Con il modello calibrato le soglie dei tier non sono piu' i vecchi 0.88/0.80/0.72 (tarati su un RF grezzo, che con probabilita' vere non scatterebbero mai): `get_tier_prob_thresholds` le ricava dal breakeven della quota del market (+12 / +6 / +2 punti). Se la classe minoritaria e' troppo piccola per le fold, il trainer torna al RF nudo invece di far fallire il retrain. Corretto anche il filtro bucket di OVER 0.5 HT, che escludeva per errore le righe 1-14'.
+
+Test: `python -m pytest -q tests`.
+
 ### Analisi shadow
 
 `analyze_shadow_signals.py` legge `live_training_data.csv` (segnali reali + shadow LEARNING) e stampa WR per market/tier/fascia minuto con verdetto contro il breakeven della quota di ogni market. Serve a decidere con i dati se aprire la finestra HT estesa (`HT_PRESSURE_WINDOW_ENABLED`) e a verificare le finestre NEXT GOAL.
@@ -106,7 +136,8 @@ I candidati sotto la soglia del modello non vengono piu' scartati: restano regis
 ## Titan Dataset Tools
 
 - inspect_titan_db.py: ispeziona il database Titan e mostra schema, righe utili e sample dei dati live raccolti.
-- export_titan_snapshots.py: esporta aw_snapshots dal DB Titan verso 	itan_raw_snapshots_export.csv in formato CSV pulito per analisi separata.
+- export_titan_snapshots.py: esporta 
+aw_snapshots dal DB Titan verso 	itan_raw_snapshots_export.csv in formato CSV pulito per analisi separata.
 - 	rain_titan_pressure_model.py: addestra un modello separato 	itan_pressure_model.pkl usando gli snapshot Titan come pressure-model live di supporto.
 - i dati Titan sono utili come dataset live secondario per ricerca e pressure modeling, ma non vanno mischiati direttamente con il training HT principale senza mappatura del target.
 
