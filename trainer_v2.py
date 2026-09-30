@@ -205,95 +205,136 @@ def train_oracle_v2() -> dict:
         wr = (mdf["Outcome"] == "WIN").mean()
         print(f"  {market}: {len(mdf)} segnali — WR {wr*100:.1f}%")
 
-    # Split temporale
+    # Divisione temporale in tre fasce.
+    # La soglia va scelta su dati diversi da quelli su cui la si giudica: sceglierla
+    # sullo stesso test set la adatta al test set. Il modello precedente aveva una
+    # soglia di 0.83 trovata massimizzando la precision proprio sul test, e fuori
+    # campione selezionava al contrario (46.8% sopra soglia, 69.5% sotto).
     validation = {}
     optimal_threshold = 0.5
+    promote = False
+    promote_reason = "validazione non eseguita: dataset troppo piccolo"
 
     if len(clean) >= MIN_CANDIDATE_ROWS * 2 and y.nunique() > 1:
-        train_df, test_df = temporal_train_test_split(clean, test_size=0.20)
+        ordered = clean.sort_values("OpenTimeUTC").reset_index(drop=True) \
+            if "OpenTimeUTC" in clean.columns else clean.reset_index(drop=True)
+        n = len(ordered)
+        i_train, i_val = int(n * 0.60), int(n * 0.80)
+        train_df = ordered.iloc[:i_train]
+        val_df = ordered.iloc[i_train:i_val]
+        test_df = ordered.iloc[i_val:]
 
-        X_train = train_df[FEATURE_COLUMNS]
-        y_train = train_df["target"]
-        X_test = test_df[FEATURE_COLUMNS]
-        y_test = test_df["target"]
+        X_train, y_train = train_df[FEATURE_COLUMNS], train_df["target"]
+        X_val, y_val = val_df[FEATURE_COLUMNS], val_df["target"]
+        X_test, y_test = test_df[FEATURE_COLUMNS], test_df["target"]
 
-        print(f"\nSplit temporale: {len(X_train)} train / {len(X_test)} test")
-        print(f"Win rate train: {y_train.mean()*100:.1f}% | test: {y_test.mean()*100:.1f}%")
+        print(f"\nSplit temporale: {len(X_train)} train / {len(X_val)} validazione / {len(X_test)} test")
+        print(f"Win rate  train {y_train.mean()*100:.1f}% | "
+              f"validazione {y_val.mean()*100:.1f}% | test {y_test.mean()*100:.1f}%")
         result["win_rate_test"] = round(float(y_test.mean()) * 100, 2)
 
-        # Modello di validazione
+        # Foresta regolarizzata. Senza limiti di profondita' e con foglie da 5
+        # campioni, 300 alberi su ~2.600 righe memorizzano il periodo di
+        # addestramento: il modello precedente correlava +0.33 in campione e
+        # -0.17 fuori.
         val_model = RandomForestClassifier(
             n_estimators=300,
             random_state=42,
-            min_samples_leaf=5,
+            max_depth=8,
+            min_samples_leaf=30,
+            max_features="sqrt",
             class_weight="balanced",
         )
         val_model.fit(X_train, y_train)
-        test_probs = val_model.predict_proba(X_test)[:, 1]
 
-        # Trova soglia ottimale (massimizza precision su WIN)
-        thresholds = np.arange(0.40, 0.85, 0.01)
-        best_threshold = 0.5
-        best_precision = 0.0
-        for thr in thresholds:
-            preds = (test_probs >= thr).astype(int)
-            if preds.sum() < 5:
+        # Soglia scelta sulla fascia di validazione, non sul test.
+        # Si richiede una copertura minima: massimizzare la sola precision spinge
+        # la soglia in alto finche' restano pochi casi fortunati.
+        val_probs = val_model.predict_proba(X_val)[:, 1]
+        base_val = float(y_val.mean())
+        min_coverage = max(20, int(len(y_val) * 0.10))
+        best_threshold, best_lift = 0.5, -1.0
+        for thr in np.arange(0.40, 0.86, 0.01):
+            selected = val_probs >= thr
+            if selected.sum() < min_coverage:
                 continue
-            prec = precision_score(y_test, preds, zero_division=0)
-            if prec > best_precision:
-                best_precision = prec
-                best_threshold = thr
-
+            lift = float(y_val[selected].mean()) - base_val
+            if lift > best_lift:
+                best_lift, best_threshold = lift, thr
         optimal_threshold = round(float(best_threshold), 2)
-        test_preds = (test_probs >= optimal_threshold).astype(int)
+
+        # Giudizio finale sulla fascia di test, mai toccata finora.
+        test_probs = val_model.predict_proba(X_test)[:, 1]
+        base_test = float(y_test.mean())
+        selected_test = test_probs >= optimal_threshold
+        n_selected = int(selected_test.sum())
+        wr_selected = float(y_test[selected_test].mean()) if n_selected else 0.0
+        wr_rejected = float(y_test[~selected_test].mean()) if (~selected_test).sum() else 0.0
+        lift_test = wr_selected - base_test
 
         validation = {
             "accuracy": float(accuracy_score(y_test, (test_probs >= 0.5).astype(int))),
             "log_loss": float(log_loss(y_test, test_probs, labels=[0, 1])),
-            "precision_at_optimal": float(precision_score(y_test, test_preds, zero_division=0)),
-            "recall_at_optimal": float(recall_score(y_test, test_preds, zero_division=0)),
             "optimal_threshold": optimal_threshold,
-            "signals_above_threshold": int(test_preds.sum()),
             "rows_test": int(len(X_test)),
+            "base_rate_test": round(base_test * 100, 2),
+            "wr_selected": round(wr_selected * 100, 2),
+            "wr_rejected": round(wr_rejected * 100, 2),
+            "signals_above_threshold": n_selected,
+            "lift_test": round(lift_test * 100, 2),
         }
 
-        print(f"\nValidazione (split temporale):")
-        print(f"  Accuracy (soglia 0.5):     {validation['accuracy']:.3f}")
-        print(f"  Log loss:                  {validation['log_loss']:.3f}")
-        print(f"  Soglia ottimale trovata:   {optimal_threshold}")
-        print(f"  Precision a soglia ottim.: {validation['precision_at_optimal']:.3f}")
-        print(f"  Recall a soglia ottimale:  {validation['recall_at_optimal']:.3f}")
-        print(f"  Segnali sopra soglia:      {validation['signals_above_threshold']}/{len(X_test)}")
+        print(f"\nGiudizio sulla fascia di test (mai usata prima):")
+        print(f"  soglia scelta in validazione: {optimal_threshold}")
+        print(f"  tasso base sul test:          {base_test*100:.1f}%")
+        print(f"  win rate sopra soglia:        {wr_selected*100:.1f}%  (n={n_selected})")
+        print(f"  win rate sotto soglia:        {wr_rejected*100:.1f}%")
+        print(f"  guadagno rispetto al caso:    {lift_test*100:+.1f} punti")
 
-        # Verifica inversione predizione
-        mean_prob_win = float(test_probs[y_test == 1].mean())
-        mean_prob_loss = float(test_probs[y_test == 0].mean())
-        print(f"\n  Mean prob su WIN:  {mean_prob_win:.4f}")
-        print(f"  Mean prob su LOSS: {mean_prob_loss:.4f}")
-        if mean_prob_loss > mean_prob_win:
-            print("  ⚠️  ATTENZIONE: il modello assegna prob più alta ai LOSS — predizione inversa rilevata.")
-            print("     Considera di escludere più tier o di rivedere le feature.")
+        # Cancello di promozione: il modello entra in produzione solo se
+        # dimostra di selezionare meglio del caso su dati mai visti.
+        MIN_LIFT = 0.03
+        MIN_SELECTED = 30
+        if n_selected < MIN_SELECTED:
+            promote_reason = f"solo {n_selected} segnali sopra soglia nel test (minimo {MIN_SELECTED})"
+        elif lift_test < MIN_LIFT:
+            promote_reason = (f"guadagno {lift_test*100:+.1f} punti sotto il minimo "
+                              f"di {MIN_LIFT*100:.0f}")
+        elif wr_selected <= wr_rejected:
+            promote_reason = "i segnali scartati vincono quanto o piu' di quelli tenuti"
         else:
-            print("  ✅ Predizione nella direzione corretta.")
+            promote = True
+            promote_reason = f"guadagno {lift_test*100:+.1f} punti su {n_selected} segnali"
 
-    # Modello finale su tutto il dataset filtrato
+    # Il modello finale usa gli stessi vincoli di quello validato: cambiare
+    # iperparametri fra validazione e produzione renderebbe il giudizio inutile.
     final_model = RandomForestClassifier(
         n_estimators=300,
         random_state=42,
-        min_samples_leaf=5,
+        max_depth=8,
+        min_samples_leaf=30,
+        max_features="sqrt",
         class_weight="balanced",
     )
     final_model.fit(X, y)
 
-    # Salva
-    target_path = MODEL_NAME if len(clean) >= MIN_PRODUCTION_ROWS else CANDIDATE_MODEL_NAME
+    if promote and len(clean) >= MIN_PRODUCTION_ROWS:
+        target_path = MODEL_NAME
+        print(f"\nPROMOSSO in produzione: {promote_reason}")
+    else:
+        target_path = CANDIDATE_MODEL_NAME
+        print(f"\nNON promosso, salvato come candidato: {promote_reason}")
+        print("  Il modello in produzione resta invariato.")
     joblib.dump(final_model, target_path)
+    result["promoted"] = promote
+    result["promote_reason"] = promote_reason
 
-    # Salva anche la soglia ottimale vicino al modello
+    # La soglia in produzione si scrive solo se il modello e' stato promosso:
+    # altrimenti resterebbe attiva una soglia di un modello mai validato.
     threshold_path = str(Path(target_path).with_suffix("")) + "_threshold.txt"
     with open(threshold_path, "w") as f:
         f.write(str(optimal_threshold))
-    print(f"\nSoglia ottimale salvata in: {threshold_path}")
+    print(f"Soglia salvata in: {threshold_path}")
 
     importances = dict(zip(FEATURE_COLUMNS, final_model.feature_importances_))
     result["feature_importances"] = importances

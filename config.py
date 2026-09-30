@@ -65,10 +65,13 @@ QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", str(QUOTA)) or str(QUOTA)
 MIN_ODD_O05_HT = float(get_setting("MIN_ODD_O05_HT", "1.40") or "1.40")
 MIN_ODD_O15_HT = float(get_setting("MIN_ODD_O15_HT", "1.60") or "1.60")
 MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
-# Con 1: scarta anche i segnali per cui la quota non e' recuperabile.
-# Con 0 (default): li pubblica ma li marca nel log, per non perdere volume
-# quando il book semplicemente non espone il mercato.
-ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "0").lower() in {"1", "true", "yes"}
+# Scarta anche i segnali per cui la quota non e' recuperabile.
+# Default 1: con 0 il filtro era di fatto inerte, perche' la quota non e' quasi
+# mai disponibile sui campionati che il filtro predilige - su 12 segnali
+# pubblicati in una giornata, zero avevano un prezzo registrato, e nessun
+# ODDS_GATE_SKIP e' mai scattato. Senza sapere a che quota si entra non si puo'
+# valutare se la giocata abbia senso.
+ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "1").lower() in {"1", "true", "yes"}
 
 # Finestra HT estesa oltre il minuto 20 sotto forte pressione live.
 # Tenere spenta finche' l'analisi shadow (analyze_shadow_signals.py) non conferma WR >= 60%.
@@ -89,6 +92,12 @@ PERFORMANCE_STARTING_BANKROLL = float(get_setting("PERFORMANCE_STARTING_BANKROLL
 AUTO_RETRAIN_EVERY_N_SETTLED = int(get_setting("AUTO_RETRAIN_EVERY_N_SETTLED", "50") or "50")
 LIVE_TRAINING_DATA_PATH = resolve_path(get_setting("LIVE_TRAINING_DATA_PATH", "live_training_data.csv"))
 MISSING_TEAMS_QUEUE_PATH = resolve_path(get_setting("MISSING_TEAMS_QUEUE_PATH", "missing_teams_queue.json"))
+
+# Storico quote live: ogni lettura riuscita, anche quando il segnale non parte.
+# Serve a misurare l'EV per minuto: il log registrava solo fallimenti e scarti
+# del filtro, cioe' un campione sbilanciato verso le quote basse.
+ODDS_HISTORY_PATH = resolve_path(get_setting("ODDS_HISTORY_PATH", "odds_history.csv"))
+ODDS_HISTORY_ENABLED = (get_setting("ODDS_HISTORY_ENABLED", "1") or "1").strip() not in {"0", "false", "False", ""}
 
 
 

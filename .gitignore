@@ -27,6 +27,7 @@ oracle_brain_candidate.pkl
 oracle_brain_v2.pkl
 oracle_brain_v2_threshold.txt
 live_training_data.csv
+odds_history.csv
 web_stats.json
 Performance_Log.csv
 Performance_Log_CHECK.csv

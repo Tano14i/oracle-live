@@ -1,3 +1,4 @@
+import csv
 import html
 import json
 import logging
@@ -43,6 +44,8 @@ from config import (
     MEMBERS_DB_PATH,
     MISSING_TEAMS_QUEUE_PATH,
     MODEL_PATH,
+    ODDS_HISTORY_ENABLED,
+    ODDS_HISTORY_PATH,
     QUOTA,
     QUOTA_NEXT_GOAL,
     QUOTA_O05_HT,
@@ -76,14 +79,18 @@ from oracle_prematch.settings import (
     PREMATCH_AUTO_COLLECT_PAGE_LIMIT,
 )
 
-from trainer import (
+# trainer_v2, non trainer: il bot carica oracle_brain_v2.pkl, mentre trainer.py
+# scriveva oracle_brain.pkl. I due percorsi non si incontravano, quindi il
+# riaddestramento automatico girava a vuoto da maggio aggiornando un file che
+# nessuno caricava.
+from trainer_v2 import (
     CANDIDATE_MODEL_NAME,
     DATA_FILE as TRAINER_DATA_FILE,
     FEATURE_COLUMNS as TRAINER_FEATURE_COLUMNS,
     MIN_CANDIDATE_ROWS,
     MIN_PRODUCTION_ROWS,
     MODEL_NAME as TRAINER_MODEL_NAME,
-    train_oracle,
+    train_oracle_v2 as train_oracle,
 )
 
 required_settings = {
@@ -131,7 +138,14 @@ TITAN_PRESSURE_MODEL_PATH = os.path.join(BASE_DIR, "titan_pressure_model.pkl")
 # --- Modello v2 con soglia ottimale ---
 V2_MODEL_PATH = os.path.join(BASE_DIR, "oracle_brain_v2.pkl")
 V2_THRESHOLD_PATH = os.path.join(BASE_DIR, "oracle_brain_v2_threshold.txt")
-V2_DEFAULT_THRESHOLD = 0.71
+# Soglia 0 = il modello non filtra piu' la pubblicazione. Fuori dal periodo su cui
+# e' stato addestrato la sua probabilita' e' anticorrelata con l'esito (-0.17 su
+# 2.350 segnali chiusi): sopra 0.71 il win rate era 46.8%, sotto 69.5%. Il
+# cancello stava scartando i segnali migliori. La selezione torna al filtro sul
+# ritmo, misurato al 73.4% contro il 63.8% del gruppo di controllo.
+# Rimettere un valore > 0 solo dopo che un riaddestramento supera la verifica
+# fuori campione in trainer_v2.py.
+V2_DEFAULT_THRESHOLD = 0.0
 TITAN_PRESSURE_FEATURE_COLUMNS = [
     "DNAxG",
     "Minute",
@@ -205,6 +219,19 @@ SEPARATOR = "----------------------------"
 VIP_PLAN_CODE = "vip_monthly"
 VIP_PLAN_NAME = "Oracle VIP Monthly"
 VIP_SYNC_INTERVAL_SECONDS = 600
+# Market esclusi del tutto dal ciclo di valutazione.
+# NEXT GOAL vince il 62.8% nella finestra 1-19, mentre il mercato reale lo paga
+# 1.02-1.13, dove il pareggio richiederebbe il 91.7%: -31.5% per puntata. Nessuna
+# taratura puo' colmare quel divario, e continuare a valutarlo costava la parte
+# maggiore delle scansioni - statistiche live, predizione del modello e richiesta
+# quote per ogni partita - sottraendola all'unico market con margine positivo.
+# I 24.000 esiti gia' raccolti restano nel dataset per eventuali analisi future.
+MARKETS_DISABLED = {MARKET_NEXT_GOAL}
+
+# Market ancora valutati ma non pubblicabili: nessuno al momento. Serve quando si
+# vuole continuare a raccogliere il dato senza scommetterlo.
+MARKETS_SHADOW_ONLY: set[str] = set()
+
 FREE_ALLOWED_TIERS = {TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING}
 AUTO_MARKET_SWITCH_ENABLED = True
 PREMIUM_ALLOWED_MARKETS = {MARKET_NEXT_GOAL}
@@ -282,18 +309,33 @@ MARKET_MIN_ODDS = {
 }
 
 
-def get_min_live_odd(market: str) -> float:
+# Ogni tier ha un win rate diverso, quindi un pareggio diverso: un minimo unico
+# per market lascia passare il tier piu' debole sotto la sua stessa soglia.
+# Aberdeen-Rangers e' uscito GAMBLING a quota 1.40 esatta, mentre quel tier
+# vince il 69.9% e va in pari solo da 1.43. Margine del 5% sopra il pareggio.
+TIER_MIN_ODDS = {TIER_APPROVED: 1.29, TIER_CAUTION: 1.40, TIER_GAMBLING: 1.50}
+
+
+def get_min_live_odd(market: str, tier: str | None = None) -> float:
+    # Il minimo per tier sostituisce quello di market, non si somma: e' ricavato
+    # dal win rate misurato del singolo tier, quindi e' l'informazione migliore.
+    # Tenere il massimo fra i due bloccherebbe APPROVED a 1.35, che con l'81.4%
+    # di win rate rende comunque il 10%.
+    if tier and market in {MARKET_OVER05_HT, MARKET_OVER15_HT}:
+        tier_min = TIER_MIN_ODDS.get(tier)
+        if tier_min:
+            return tier_min
     return MARKET_MIN_ODDS.get(market, 0.0)
 
 
-def should_skip_by_odds(market: str, live_odd) -> tuple:
+def should_skip_by_odds(market: str, live_odd, tier: str | None = None) -> tuple:
     """Scarta i segnali che il mercato non paga abbastanza da coprire il breakeven.
 
     Prima la quota minima era solo una riga di avviso nel messaggio e il segnale
     partiva comunque: NEXT GOAL veniva pubblicato a 1.09 contro un breakeven del
     91.7%, cioe' era vinto sul campo ma ingiocabile in cassa.
     """
-    minimum = get_min_live_odd(market)
+    minimum = get_min_live_odd(market, tier)
     if minimum <= 0:
         return False, ""
     if live_odd is None:
@@ -1032,12 +1074,13 @@ def get_active_markets():
 
 def get_routed_active_markets():
     markets = list(dict.fromkeys(get_active_markets()))
-    if not AUTO_MARKET_SWITCH_ENABLED:
-        return markets
-    mode = get_market_mode()
-    if mode in {"NEXT_GOAL", "HT_NEXT"}:
-        return [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]
-    return markets
+    if AUTO_MARKET_SWITCH_ENABLED:
+        mode = get_market_mode()
+        if mode in {"NEXT_GOAL", "HT_NEXT"}:
+            markets = [MARKET_OVER05_HT, MARKET_OVER15_HT, MARKET_NEXT_GOAL]
+    # I market disabilitati escono qui, prima di qualunque lavoro costoso:
+    # cosi' non si spendono chiamate a statistiche e quote per valutarli.
+    return [m for m in markets if m not in MARKETS_DISABLED]
 
 
 def get_market_router_score(market: str, minute_value: int, total_goals: int) -> float:
@@ -1618,7 +1661,15 @@ def set_market_mode(mode: str) -> str:
     with state_lock:
         stats["market_mode"] = mode
     salva_dati_web()
-    return MARKET_PRESETS[mode]["label"]
+    label = MARKET_PRESETS[mode]["label"]
+    # Il menu offre ancora NEXT GOAL: meglio dirlo che lasciare l'utente a
+    # chiedersi perche' abbia scelto un market e ne riceva un altro.
+    disabled = [m for m in MARKET_PRESETS[mode]["markets"] if m in MARKETS_DISABLED]
+    if disabled:
+        label += (f" (nota: {', '.join(disabled)} e' disattivato — "
+                  f"paga 1.02-1.13 contro un pareggio del 91.7%; "
+                  f"restano attivi i market di primo tempo)")
+    return label
 
 
 
@@ -1798,17 +1849,25 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
             return None
         if min(home_ht, away_ht) < 0.80:
             return None
-        if prob >= 0.88 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.60:
+        # Soglie di probabilita' allineate al modello attuale, non a quello vecchio.
+        # Il modello regolarizzato produce una distribuzione stretta (media 0.52,
+        # deviazione 0.077): con i vecchi valori 0.88/0.80/0.72 passerebbe lo 0.1%
+        # dei casi e i segnali si azzererebbero. 0.60/0.56/0.50 corrispondono al
+        # 16%, 31% e 62% della distribuzione, e 0.56 e' la soglia che il
+        # riaddestramento ha validato fuori campione.
+        # Il ritmo resta il criterio primario: e' l'unico validato su 357.573
+        # partite con gruppo di controllo.
+        if prob >= 0.60 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.60:
             return {
                 "tier": TIER_APPROVED,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | 0-0 with time window still strong",
             }
-        if prob >= 0.80 and avg_total_goals >= 2.20 and avg_ht_goals >= 1.30:
+        if prob >= 0.56 and avg_total_goals >= 2.20 and avg_ht_goals >= 1.30:
             return {
                 "tier": TIER_CAUTION,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | setup still tradable",
             }
-        if prob >= 0.72 and avg_total_goals >= 2.08 and avg_ht_goals >= 1.10 and min(home_ht, away_ht) >= 0.80:
+        if prob >= 0.50 and avg_total_goals >= 2.08 and avg_ht_goals >= 1.10 and min(home_ht, away_ht) >= 0.80:
             return {
                 "tier": TIER_GAMBLING,
                 "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | aggressive early HT value setup",
@@ -2475,19 +2534,205 @@ def format_admin_panel() -> str:
     )
 
 
+ODDS_GATE_LOG_TAIL_BYTES = 6 * 1024 * 1024
+RECAP_ROLLING_DAYS = 7
+_ODDS_GATE_LOW_RE = re.compile(r"quota ([0-9]+(?:\.[0-9]+)?) sotto il minimo")
+
+
+def compute_real_pl(part) -> tuple:
+    """P/L sulle quote davvero ottenute.
+
+    compute_performance_snapshot() valorizza ogni vincita con la quota di config
+    (NEXT GOAL a 1.75 quando il book pagava 1.05): qui restano fuori i segnali
+    senza OpenOdd invece di essere riempiti con un numero inventato.
+    """
+    stake = float(STAKE or 0.0)
+    priced = part[part["odd"].notna() & part["Outcome"].isin(["WIN", "LOSS"])]
+    if priced.empty or stake <= 0:
+        return 0.0, 0, 0.0
+    won_odds = priced.loc[priced["Outcome"] == "WIN", "odd"]
+    losses = int((priced["Outcome"] == "LOSS").sum())
+    profit = (float((won_odds - 1.0).sum()) - losses) * stake
+    return profit, int(len(priced)), float(priced["odd"].mean())
+
+
+def compute_daily_snapshot(date_key: str = "") -> dict:
+    """Recap del giorno letto dal registro segnali, unica fonte verificabile."""
+    date_key = date_key or current_date_key()
+    snapshot = {
+        "date_utc": date_key, "available": False, "published": 0, "wins": 0,
+        "losses": 0, "pending": 0, "win_rate": 0.0, "profit": 0.0, "priced": 0,
+        "avg_odd": 0.0, "by_market": [], "by_tier": {}, "rolling": {},
+    }
+    try:
+        with live_training_lock:
+            df = pd.read_csv(TRAINER_DATA_FILE)
+    except Exception:
+        return snapshot
+    required = ["SignalKey", "OpenTimeUTC", "Market", "Tier", "Outcome"]
+    if df.empty or not all(column in df.columns for column in required):
+        return snapshot
+    df = df[df["Tier"].isin({TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING})].copy()
+    if df.empty:
+        return snapshot
+    df["SignalKey"] = df["SignalKey"].astype(str)
+    df = df.drop_duplicates(subset=["SignalKey"], keep="last")
+    df["opened"] = pd.to_datetime(df["OpenTimeUTC"], errors="coerce", utc=True)
+    df = df[df["opened"].notna()]
+    if df.empty:
+        return snapshot
+    df["day"] = df["opened"].dt.date.astype(str)
+    df["odd"] = pd.to_numeric(df["OpenOdd"], errors="coerce") if "OpenOdd" in df.columns else pd.NA
+    df["Market"] = df["Market"].fillna("UNKNOWN").astype(str)
+
+    today = df[df["day"] == date_key]
+    snapshot["available"] = True
+    snapshot["published"] = int(len(today))
+    wins = int((today["Outcome"] == "WIN").sum())
+    losses = int((today["Outcome"] == "LOSS").sum())
+    settled = wins + losses
+    snapshot["wins"] = wins
+    snapshot["losses"] = losses
+    snapshot["pending"] = int(len(today)) - settled
+    snapshot["win_rate"] = (wins / settled * 100) if settled else 0.0
+    snapshot["profit"], snapshot["priced"], snapshot["avg_odd"] = compute_real_pl(today)
+    snapshot["by_tier"] = {
+        tier: int((today["Tier"] == tier).sum())
+        for tier in (TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING)
+    }
+    for market_name, df_market in today.groupby("Market"):
+        market_wins = int((df_market["Outcome"] == "WIN").sum())
+        market_losses = int((df_market["Outcome"] == "LOSS").sum())
+        market_settled = market_wins + market_losses
+        market_profit, market_priced, market_odd = compute_real_pl(df_market)
+        snapshot["by_market"].append({
+            "market": market_name,
+            "published": int(len(df_market)),
+            "wins": market_wins,
+            "losses": market_losses,
+            "win_rate": (market_wins / market_settled * 100) if market_settled else 0.0,
+            "profit": market_profit,
+            "priced": market_priced,
+            "avg_odd": market_odd,
+        })
+    snapshot["by_market"].sort(key=lambda item: (-item["published"], item["market"]))
+
+    try:
+        first_day = (now_utc().date() - timedelta(days=RECAP_ROLLING_DAYS - 1)).isoformat()
+    except Exception:
+        first_day = date_key
+    window = df[df["day"] >= first_day]
+    roll_wins = int((window["Outcome"] == "WIN").sum())
+    roll_losses = int((window["Outcome"] == "LOSS").sum())
+    roll_settled = roll_wins + roll_losses
+    roll_profit, roll_priced, _ = compute_real_pl(window)
+    snapshot["rolling"] = {
+        "days": RECAP_ROLLING_DAYS,
+        "published": int(len(window)),
+        "wins": roll_wins,
+        "losses": roll_losses,
+        "win_rate": (roll_wins / roll_settled * 100) if roll_settled else 0.0,
+        "profit": roll_profit,
+        "priced": roll_priced,
+    }
+    return snapshot
+
+
+def count_odds_gate_skips(date_key: str = "") -> dict:
+    """Quanti ingressi ha evitato oggi il filtro quote. Best effort, dal log."""
+    date_key = date_key or current_date_key()
+    result = {"available": False, "low": 0, "missing": 0, "avg_odd": 0.0}
+    try:
+        size = os.path.getsize(LOG_FILE_PATH)
+        with open(LOG_FILE_PATH, "rb") as handle:
+            handle.seek(max(0, size - ODDS_GATE_LOG_TAIL_BYTES))
+            chunk = handle.read().decode("utf-8", "ignore")
+    except Exception:
+        return result
+    odds = []
+    for line in chunk.splitlines():
+        if "| ODDS_GATE_SKIP |" not in line or not line.startswith(date_key):
+            continue
+        result["available"] = True
+        match = _ODDS_GATE_LOW_RE.search(line)
+        if match:
+            result["low"] += 1
+            odds.append(float(match.group(1)))
+        elif "quota non disponibile" in line:
+            result["missing"] += 1
+    if odds:
+        result["avg_odd"] = sum(odds) / len(odds)
+    return result
+
+
+def format_money(profit: float, priced: int) -> str:
+    """Senza quote registrate non esiste un P/L: si dice, non si scrive 0.00."""
+    if priced <= 0:
+        return "n/d (nessuna quota registrata)"
+    return f"{profit:+.2f} EUR su {priced} prezzat{'a' if priced == 1 else 'e'}"
+
+
+def format_daily_by_market(snapshot: dict, max_items: int = 6) -> str:
+    rows = snapshot.get("by_market") or []
+    if not rows:
+        return "nessun segnale pubblicato"
+    lines = []
+    for row in rows[:max_items]:
+        settled = row["wins"] + row["losses"]
+        head = f"{row['market']}: {row['published']} pubblicati"
+        if settled:
+            head += f" | {row['wins']}W-{row['losses']}L | WR {row['win_rate']:.1f}%"
+        if row["priced"]:
+            head += f" | q {row['avg_odd']:.2f} | P/L {row['profit']:+.2f} EUR"
+        lines.append(head)
+    return "\n".join(lines)
+
+
 def format_admin_recap() -> str:
     analytics = stats["daily_analytics"]
+    snapshot = compute_daily_snapshot()
+    gate = count_odds_gate_skips()
+    rolling = snapshot.get("rolling") or {}
+    by_tier = snapshot.get("by_tier") or {}
+    if gate.get("available"):
+        gate_text = (
+            f"Scartati per prezzo basso: {gate['low']}"
+            + (f" (quota media {gate['avg_odd']:.2f})" if gate["low"] else "")
+            + f"\nScartati per quota assente: {gate['missing']}"
+        )
+    else:
+        gate_text = "n/a"
+    if rolling:
+        rolling_text = (
+            f"{rolling['published']} pubblicati | {rolling['wins']}W-{rolling['losses']}L"
+            f" | WR {rolling['win_rate']:.1f}%"
+            f" | P/L {format_money(rolling['profit'], rolling['priced'])}"
+        )
+    else:
+        rolling_text = "n/a"
     return (
         f"<b>DAILY ADMIN RECAP</b>\n"
         f"{SEPARATOR}\n"
-        f"<b>Date UTC:</b> {analytics['date_utc']}\n"
-        f"<b>Signals:</b> {analytics['signals_total']}\n"
-        f"<b>Approved:</b> {analytics['signals_by_tier'].get(TIER_APPROVED, 0)} | <b>Caution:</b> {analytics['signals_by_tier'].get(TIER_CAUTION, 0)} | <b>Gambling:</b> {analytics['signals_by_tier'].get(TIER_GAMBLING, 0)}\n"
-        f"<b>WIN:</b> {analytics['settled_win']} | <b>LOSS:</b> {analytics['settled_loss']}\n"
-        f"<b>Rolling overall:</b> {escape_html(format_rolling_overview())}\n"
+        f"<b>Date UTC:</b> {snapshot['date_utc']}\n"
+        f"<b>Pubblicati:</b> {snapshot['published']} | <b>In corso:</b> {snapshot['pending']}\n"
+        f"<b>Chiusi:</b> {snapshot['wins']}W-{snapshot['losses']}L | <b>WR:</b> {snapshot['win_rate']:.1f}%\n"
+        f"<b>P/L reale:</b> {format_money(snapshot['profit'], snapshot['priced'])}\n"
+        f"<b>Tier:</b> APPROVED {by_tier.get(TIER_APPROVED, 0)} | CAUTION {by_tier.get(TIER_CAUTION, 0)} | GAMBLING {by_tier.get(TIER_GAMBLING, 0)}\n"
+        f"{SEPARATOR}\n"
+        f"<b>PER MARKET</b>\n"
+        f"{escape_html(format_daily_by_market(snapshot))}\n"
+        f"{SEPARATOR}\n"
+        f"<b>FILTRO QUOTE</b>\n"
+        f"{escape_html(gate_text)}\n"
+        f"{SEPARATOR}\n"
+        f"<b>ULTIMI {rolling.get('days', RECAP_ROLLING_DAYS)} GIORNI</b>\n"
+        f"{escape_html(rolling_text)}\n"
+        f"{SEPARATOR}\n"
         f"<b>Free teasers:</b> {analytics['free_teasers_sent']} sent\n"
         f"<b>VIP payments:</b> {analytics['vip_payments_count']} | <b>Revenue XTR:</b> {analytics['vip_revenue_xtr']}\n"
-        f"<b>VIP active:</b> {membership_store.get_active_member_count()}"
+        f"<b>VIP active:</b> {membership_store.get_active_member_count()}\n"
+        f"{SEPARATOR}\n"
+        f"<i>P/L contato solo sulle quote realmente ottenute; i segnali senza quota registrata restano fuori.</i>"
     )
 
 
@@ -3712,7 +3957,43 @@ def get_live_odds_target(market: str, total_goals: int):
     return None
 
 
-def fetch_live_market_odd(fixture_id: int, headers: dict, market: str, total_goals: int = 0):
+ODDS_HISTORY_COLUMNS = [
+    "ObservedAtUTC", "FixtureId", "Market", "Minute", "Line", "Odd", "Books",
+]
+odds_history_lock = threading.RLock()
+
+
+def record_live_odd(fixture_id, market: str, minute, line, odd, books: int) -> None:
+    """Registra ogni quota letta, anche quando poi il segnale non parte.
+
+    Senza questo restano tracciate solo le quote dei segnali aperti e di quelli
+    scartati dal gate: il primo campione e' sbilanciato in alto, il secondo in
+    basso, e l'EV per minuto non e' misurabile da nessuno dei due.
+    """
+    if not ODDS_HISTORY_ENABLED:
+        return
+    try:
+        row = {
+            "ObservedAtUTC": now_utc().isoformat(),
+            "FixtureId": fixture_id,
+            "Market": market,
+            "Minute": "" if minute is None else minute,
+            "Line": line,
+            "Odd": odd,
+            "Books": books,
+        }
+        with odds_history_lock:
+            exists = os.path.exists(ODDS_HISTORY_PATH)
+            with open(ODDS_HISTORY_PATH, "a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=ODDS_HISTORY_COLUMNS)
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(row)
+    except Exception as exc:
+        log_event("ODDS_HISTORY_FAIL", "fid=" + str(fixture_id) + " err=" + str(exc))
+
+
+def fetch_live_market_odd(fixture_id: int, headers: dict, market: str, total_goals: int = 0, minute=None):
     """Quota live per la linea realmente giocata dal segnale.
 
     L'endpoint live espone i mercati sotto la chiave "odds", con la linea nel
@@ -3779,6 +4060,7 @@ def fetch_live_market_odd(fixture_id: int, headers: dict, market: str, total_goa
         # Media tra book sulla stessa linea: qui l'aggregazione ha senso.
         avg_odd = round(sum(matching_odds) / len(matching_odds), 2)
         fixture_stats_cache[cache_key] = {"ts": now_ts, "data": avg_odd}
+        record_live_odd(fixture_id, market, minute, target_line, avg_odd, len(matching_odds))
         return avg_odd
     except Exception as exc:
         log_event("LIVE_ODDS_ERROR", "fid=" + str(fixture_id) + " err=" + str(exc))
@@ -4692,16 +4974,26 @@ def radar_loop() -> None:
                                 continue
                             shadow_only = assessment.get("tier") == TIER_LEARNING
                     clear_pending_signal_tracker(signal_key)
+                    # Punto unico in cui ogni percorso converge: qui si applica il
+                    # divieto di pubblicazione, cosi' nessuna scorciatoia (pressione,
+                    # Titan, persistenza) puo' aggirarlo.
+                    if not shadow_only and market in MARKETS_SHADOW_ONLY:
+                        shadow_only = True
+                        assessment = {
+                            "tier": TIER_LEARNING,
+                            "reason": f"{assessment.get('reason', '')} | market non pubblicabile".strip(" |"),
+                        }
+                        log_event("MARKET_NOT_PUBLISHABLE", f"key={signal_key} market={market}")
                     tier = assessment["tier"]
                     reason = assessment["reason"]
                     minute_bucket = get_minute_bucket(minute_value)
 
                     # Quota reale all'apertura, recuperata anche per gli shadow: senza di essa
                     # ogni ROI resta un'ipotesi basata sulla quota fissa di config.
-                    live_odd = fetch_live_market_odd(fixture_id, headers, market, total_goals)
+                    live_odd = fetch_live_market_odd(fixture_id, headers, market, total_goals, minute_value)
 
                     if not shadow_only:
-                        odds_skip, odds_reason = should_skip_by_odds(market, live_odd)
+                        odds_skip, odds_reason = should_skip_by_odds(market, live_odd, tier)
                         if odds_skip:
                             scan_debug["odds_skip"] = scan_debug.get("odds_skip", 0) + 1
                             log_event(
