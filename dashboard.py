@@ -129,6 +129,9 @@ def load_training_data() -> pd.DataFrame:
     if not os.path.exists(DATASET_PATH):
         return pd.DataFrame()
     df = pd.read_csv(DATASET_PATH)
+    # Un segnale, una riga: i pendenti venivano riaccodati a ogni scansione.
+    if "SignalKey" in df.columns:
+        df = df.drop_duplicates(subset="SignalKey", keep="first")
     if df.empty:
         return df
     for column in ["OpenTimeUTC", "SettledTimeUTC"]:

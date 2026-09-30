@@ -309,20 +309,34 @@ MARKET_MIN_ODDS = {
 }
 
 
-# Ogni tier ha un win rate diverso, quindi un pareggio diverso: un minimo unico
-# per market lascia passare il tier piu' debole sotto la sua stessa soglia.
-# Aberdeen-Rangers e' uscito GAMBLING a quota 1.40 esatta, mentre quel tier
-# vince il 69.9% e va in pari solo da 1.43. Margine del 5% sopra il pareggio.
-TIER_MIN_ODDS = {TIER_APPROVED: 1.29, TIER_CAUTION: 1.40, TIER_GAMBLING: 1.50}
+# Quota minima per market e tier: breakeven calcolato sul limite inferiore
+# dell'intervallo di confidenza 95% del win rate misurato, arrotondato ai 5
+# centesimi superiori. Una regola sola per tutti, e i campioni piccoli si
+# penalizzano da soli: meno dati, intervallo piu' largo, soglia piu' alta.
+#
+# Ricavate il 30/09/2026 da live_training_data.csv dopo la deduplicazione e la
+# riparazione delle etichette NEXT GOAL. I numeri precedenti (1.29/1.40/1.50)
+# venivano da win rate calcolati su righe duplicate e su 591 esiti sbagliati.
+#
+# Due cose che questi numeri dicono e che vanno lette:
+# - NEXT GOAL vince il 89-92% in ogni tier, ma il book lo paga ~1.12: il market
+#   e' quasi sempre vinto sul campo e quasi mai giocabile in cassa.
+# - su OVER 0.5 HT APPROVED vince il 49.7% e GAMBLING il 71.7%: il tier non
+#   ordina niente su questo market, e APPROVED chiede una quota mai vista.
+TIER_MIN_ODDS_BY_MARKET = {
+    MARKET_OVER05_HT: {TIER_APPROVED: 2.40, TIER_CAUTION: 1.70, TIER_GAMBLING: 1.60},
+    MARKET_NEXT_GOAL: {TIER_APPROVED: 1.20, TIER_CAUTION: 1.40, TIER_GAMBLING: 1.20},
+}
 
 
 def get_min_live_odd(market: str, tier: str | None = None) -> float:
     # Il minimo per tier sostituisce quello di market, non si somma: e' ricavato
-    # dal win rate misurato del singolo tier, quindi e' l'informazione migliore.
-    # Tenere il massimo fra i due bloccherebbe APPROVED a 1.35, che con l'81.4%
-    # di win rate rende comunque il 10%.
-    if tier and market in {MARKET_OVER05_HT, MARKET_OVER15_HT}:
-        tier_min = TIER_MIN_ODDS.get(tier)
+    # dal win rate misurato di quel tier su quel market, che e' l'informazione
+    # piu' specifica disponibile. Dove non c'e' un campione sufficiente per
+    # stimarlo (OVER 1.5 HT, tier LEARNING) resta il minimo di market.
+    by_tier = TIER_MIN_ODDS_BY_MARKET.get(market)
+    if tier and by_tier:
+        tier_min = by_tier.get(tier)
         if tier_min:
             return tier_min
     return MARKET_MIN_ODDS.get(market, 0.0)
@@ -471,6 +485,7 @@ def default_prematch_watch_state() -> dict:
     }
 
 stats = {
+    "radar_running": False,
     TIER_APPROVED: {"v": 0, "p": 0},
     TIER_CAUTION: {"v": 0, "p": 0},
     TIER_GAMBLING: {"v": 0, "p": 0},
@@ -2390,15 +2405,19 @@ def get_market_debug_status(
             return f"{market}: PRESSURE_ALERT no-stats prob {prob:.2f}"
     if titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
         return f"{market}: PRESSURE_ALERT titan {titan_pressure_prob:.2f}"
+    # Le regole a mano non aprono piu' nulla da sole, quindi la diagnostica non
+    # deve piu' annunciare un'allerta che non esiste: resta un'annotazione.
     if titan_soft.get("score", 0) >= 3:
-        return f"{market}: PRESSURE_ALERT soft {titan_soft.get('score', 0)}"
+        titan_note = f" | titan soft {titan_soft.get('score', 0)}/4"
+    else:
+        titan_note = ""
 
     assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
     if assessment:
-        return f"{market}: SHADOW ({assessment['tier']}) prob {prob:.2f}"
+        return f"{market}: SHADOW ({assessment['tier']}) prob {prob:.2f}{titan_note}"
     assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
     if assessment:
-        return f"{market}: SHADOW_WIDE ({assessment['tier']}) prob {prob:.2f}"
+        return f"{market}: SHADOW_WIDE ({assessment['tier']}) prob {prob:.2f}{titan_note}"
 
     skip_signal, skip_reason = should_skip_by_live_performance(market, league_name, get_minute_bucket(minute_value))
     if skip_signal:
@@ -2413,7 +2432,7 @@ def get_market_debug_status(
     )
     if stats_skip:
         return f"{market}: LIVE_STATS_SKIP {stats_skip_reason}"
-    return f"{market}: CANDIDATE_FAILED prob {prob:.2f}"
+    return f"{market}: CANDIDATE_FAILED prob {prob:.2f}{titan_note}"
 
 
 def format_radar_check_text(limit: int = 10) -> str:
@@ -4336,9 +4355,22 @@ def chiudi_scommessa(signal_key: str, vinta: bool, score_finale: str) -> None:
     maybe_send_performance_report()
     maybe_trigger_auto_retrain()
 
+def set_radar_state(active: bool) -> None:
+    """Ricorda se il radar deve stare acceso, cosi' un riavvio lo ritrova com'era.
+
+    Il supervisore rimette in piedi il processo, ma fino a qui lo rimetteva in
+    piedi col radar spento: il bot risultava vivo e non guardava una partita,
+    che e' esattamente il modo in cui si perdono giornate senza accorgersene.
+    """
+    with state_lock:
+        stats["radar_running"] = bool(active)
+    salva_dati_web()
+
+
 def stop_radar() -> None:
     global running
     running = False
+    set_radar_state(False)
     log_event('RADAR_STOP', 'Radar paused by admin')
 
 
@@ -4828,6 +4860,16 @@ def radar_loop() -> None:
                     if signal_key in stats["segnali_inviati"]:
                         scan_debug["pending_or_sent"] += 1
                         continue
+                    # Un segnale gia' aperto e non ancora chiuso non si riapre. La
+                    # riapertura riscriveva total_goals_at_open con il punteggio
+                    # corrente: un NEXT GOAL diventava impossibile da vincere man mano
+                    # che i gol arrivavano, e ogni scansione lasciava una riga doppia
+                    # nel dataset. segnali_inviati non bastava: gli shadow non ci
+                    # finiscono mai dentro, ed e' li' che il danno era piu' grande.
+                    existing_signal = stats["monitor_risultati"].get(signal_key)
+                    if isinstance(existing_signal, dict) and existing_signal.get("status") == "pending":
+                        scan_debug["pending_or_sent"] += 1
+                        continue
                     if opened_primary_signal:
                         log_event("MARKET_ROUTER_SKIP", f"fixture_id={fixture_id} market={market} routed_to_primary=1 minute={minute_value} score={score}")
                         continue
@@ -4938,8 +4980,11 @@ def radar_loop() -> None:
                             pass
                         elif pressure_alert_reason is None and titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PRESSURE_ALERT_THRESHOLD:
                             pressure_alert_reason = f"titan pressure alert {titan_pressure_prob:.2f}"
-                        elif pressure_alert_reason is None and titan_soft.get("score", 0) >= 3:
-                            pressure_alert_reason = titan_soft.get("label", "titan pressure alert")
+                        # Le regole a mano non aprono piu' un segnale da sole. Aprivano
+                        # un CAUTION scavalcando il modello: 43 segnali con probabilita'
+                        # media 0.44 che hanno chiuso al 27.9%, su un market che di base
+                        # fa il 67%. Restano l'allerta da probabilita' alta qui sopra e
+                        # quella del modello Titan, che almeno reggono il tasso base.
                         if pressure_alert_reason:
                             assessment = {"tier": TIER_CAUTION, "reason": pressure_alert_reason}
                             log_event("SIGNAL_PRESSURE_ALERT", f"fixture_id={fixture_id} market={market} reason={pressure_alert_reason}")
@@ -4992,16 +5037,10 @@ def radar_loop() -> None:
                     # ogni ROI resta un'ipotesi basata sulla quota fissa di config.
                     live_odd = fetch_live_market_odd(fixture_id, headers, market, total_goals, minute_value)
 
+                    # Filtri di performance, declassamento e promozioni Titan: il tier
+                    # che esce di qui e' quello definitivo, ed e' su quello che va
+                    # misurata la quota minima.
                     if not shadow_only:
-                        odds_skip, odds_reason = should_skip_by_odds(market, live_odd, tier)
-                        if odds_skip:
-                            scan_debug["odds_skip"] = scan_debug.get("odds_skip", 0) + 1
-                            log_event(
-                                "ODDS_GATE_SKIP",
-                                f"fixture_id={fixture_id} market={market} minute={minute_value} {odds_reason}",
-                            )
-                            continue
-
                         skip_signal, skip_reason = should_skip_by_live_performance(market, league_name, minute_bucket)
                         if skip_signal:
                             scan_debug["performance_skip"] += 1
@@ -5016,27 +5055,53 @@ def radar_loop() -> None:
                                 tier = TIER_CAUTION
                             reason = f"{reason} | live context caution: {stats_skip_reason}" if reason else f"live context caution: {stats_skip_reason}"
                             log_event("SIGNAL_DOWNGRADED", f"fixture_id={fixture_id} market={market} downgraded_to={tier} reason={stats_skip_reason}")
+                        # Le promozioni Titan non alzano piu' il tier: lo annotano.
+                        #
+                        # Misurato il 30/09/2026 su 564 OVER 0.5 HT chiusi, separando
+                        # chi aveva promosso il segnale:
+                        #   nessuno              n=380  WR 67.4%   <- il migliore
+                        #   solo modello Titan   n= 22  WR 63.6%
+                        #   entrambi             n=119  WR 57.1%
+                        #   solo regole a mano   n= 43  WR 27.9%   <- il peggiore
+                        # e a parita' di probabilita' del modello la promozione togliera
+                        # fra 5 e 16 punti di win rate in ogni banda.
+                        #
+                        # Il risultato era un tier invertito: 172 dei 174 APPROVED erano
+                        # promossi, con probabilita' media 0.55 contro 0.79 di CAUTION e
+                        # minimi a 0.05. Il tier piu' alto vinceva il 49.7% e il piu'
+                        # basso il 71.7%, cioe' l'etichetta di confidenza ordinava al
+                        # contrario. Le regole guardano tiri, angoli e tiri in porta, che
+                        # il modello gia' vede e a cui da' peso 0.006-0.025: e' un
+                        # override scritto a mano su informazione gia' scartata dai dati.
+                        #
+                        # L'informazione resta nel messaggio, dove e' utile a chi legge,
+                        # e nel log: non decide piu' il tier.
                         if titan_pressure_prob is not None and titan_pressure_prob >= TITAN_PROMOTION_THRESHOLD:
-                            original_tier = tier
-                            if tier == TIER_GAMBLING:
-                                tier = TIER_CAUTION
-                            elif tier == TIER_CAUTION:
-                                tier = TIER_APPROVED
-                            if tier != original_tier:
-                                titan_reason = f"titan model prob {titan_pressure_prob:.2f}"
-                                reason = f"{reason} | {titan_reason}" if reason else titan_reason
-                                log_event("SIGNAL_PROMOTED", f"fixture_id={fixture_id} market={market} from={original_tier} to={tier} reason={titan_reason}")
+                            titan_reason = f"titan model prob {titan_pressure_prob:.2f}"
+                            reason = f"{reason} | {titan_reason}" if reason else titan_reason
+                            log_event("TITAN_NOTE", f"fixture_id={fixture_id} market={market} tier={tier} {titan_reason}")
                         if titan_soft.get("promote"):
-                            original_tier = tier
-                            if tier == TIER_GAMBLING:
-                                tier = TIER_CAUTION
-                            elif tier == TIER_CAUTION:
-                                tier = TIER_APPROVED
-                            if tier != original_tier:
-                                titan_reason = titan_soft.get("label", "")
-                                reason = f"{reason} | {titan_reason}" if reason and titan_reason else (titan_reason or reason)
-                                log_event("SIGNAL_PROMOTED", f"fixture_id={fixture_id} market={market} from={original_tier} to={tier} reason={titan_reason}")
+                            titan_reason = titan_soft.get("label", "")
+                            if titan_reason:
+                                reason = f"{reason} | {titan_reason}" if reason else titan_reason
+                                log_event("TITAN_NOTE", f"fixture_id={fixture_id} market={market} tier={tier} {titan_reason}")
 
+                        # Quota minima, valutata sul tier definitivo. Sotto il minimo il
+                        # segnale non si butta: diventa shadow/LEARNING. Scartarlo lasciava
+                        # zero righe e zero modo di sapere se il gate tagliava vincenti o
+                        # perdenti; cosi' la riga resta e il dubbio si misura.
+                        odds_skip, odds_reason = should_skip_by_odds(market, live_odd, tier)
+                        if odds_skip:
+                            scan_debug["odds_skip"] = scan_debug.get("odds_skip", 0) + 1
+                            log_event(
+                                "ODDS_GATE_SHADOW",
+                                f"fixture_id={fixture_id} market={market} minute={minute_value} tier={tier} {odds_reason}",
+                            )
+                            reason = f"{reason} | quota gate: {odds_reason}" if reason else f"quota gate: {odds_reason}"
+                            shadow_only = True
+                            tier = TIER_LEARNING
+
+                    if not shadow_only:
                         with state_lock:
                             stats["segnali_inviati"].append(signal_key)
                         increment_analytics("signals_total")
@@ -5401,6 +5466,7 @@ def go_cmd(message):
         return
     if not running:
         running = True
+        set_radar_state(True)
         threading.Thread(target=radar_loop, daemon=True).start()
         bot.send_message(message.chat.id, f"Radar online. Filter: {get_filter_label()} | Market: {get_market_label()}")
     else:
@@ -5669,6 +5735,14 @@ if __name__ == "__main__":
     threading.Thread(target=recap_loop, daemon=True).start()
     threading.Thread(target=prematch_auto_collect_loop, daemon=True).start()
     threading.Thread(target=prematch_watch_loop, daemon=True).start()
+
+    # Il radar torna com'era prima del riavvio. Senza questo, dopo ogni crash
+    # il processo ripartiva ma nessuno guardava le partite finche' un umano non
+    # ridava AVVIA AI RADAR a mano.
+    if stats.get("radar_running"):
+        running = True
+        threading.Thread(target=radar_loop, daemon=True).start()
+        log_event("BOOT", "Radar ripreso: era acceso prima del riavvio")
 
     if os.path.exists(CSV_PATH):
         df_matches = pd.read_csv(CSV_PATH, low_memory=False)

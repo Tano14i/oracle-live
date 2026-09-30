@@ -57,6 +57,11 @@ def main() -> int:
 
     try:
         df = pd.read_csv(args.csv)
+        # Un segnale, una riga: finche' restava pendente veniva riaccodato a
+        # ogni scansione, e le copie pesano i perdenti (chi vince subito si
+        # chiude alla prima scansione e ne lascia una sola).
+        if "SignalKey" in df.columns:
+            df = df.drop_duplicates(subset="SignalKey", keep="first")
     except Exception as exc:
         print(f"Impossibile leggere {args.csv}: {exc}")
         return 1

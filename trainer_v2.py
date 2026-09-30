@@ -81,6 +81,7 @@ def apply_training_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
     stats = {
         "input": len(df),
+        "excluded_duplicate_signals": 0,
         "excluded_not_settled": 0,
         "excluded_learning_tier": 0,
         "excluded_invalid_market_bucket": 0,
@@ -88,9 +89,19 @@ def apply_training_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "final": 0,
     }
 
+    # 0. Un segnale, una riga.
+    # Finche' restava pendente, lo stesso segnale veniva riaccodato a ogni
+    # scansione: 30.260 righe per 3.512 segnali reali, con punte di 135 copie.
+    # I duplicati non sono neutri, pesano i perdenti (chi il gol lo prende subito
+    # si chiude alla prima scansione e lascia una riga sola), e le copie tardive
+    # portano uno stato a partita avanzata sotto colonne che si chiamano "AtOpen".
+    # Si tiene la prima riga: e' l'unica scattata davvero al momento della decisione.
+    deduped = df.drop_duplicates(subset="SignalKey", keep="first").copy()
+    stats["excluded_duplicate_signals"] = stats["input"] - len(deduped)
+
     # 1. Solo WIN/LOSS
-    settled = df[df["Outcome"].isin(["WIN", "LOSS"])].copy()
-    stats["excluded_not_settled"] = stats["input"] - len(settled)
+    settled = deduped[deduped["Outcome"].isin(["WIN", "LOSS"])].copy()
+    stats["excluded_not_settled"] = len(deduped) - len(settled)
 
     # 2. Solo tier pubblici (escludi LEARNING)
     public = settled[settled["Tier"].isin(PUBLIC_TIERS)].copy()
@@ -175,6 +186,7 @@ def train_oracle_v2() -> dict:
 
     print(f"\nFiltri applicati:")
     print(f"  Input totale:              {excl_stats['input']}")
+    print(f"  Esclusi (righe duplicate): {excl_stats['excluded_duplicate_signals']}")
     print(f"  Esclusi (non settled):     {excl_stats['excluded_not_settled']}")
     print(f"  Esclusi (LEARNING tier):   {excl_stats['excluded_learning_tier']}")
     print(f"  Esclusi (market/bucket):   {excl_stats['excluded_invalid_market_bucket']}")

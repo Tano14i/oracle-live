@@ -71,7 +71,7 @@ MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
 # pubblicati in una giornata, zero avevano un prezzo registrato, e nessun
 # ODDS_GATE_SKIP e' mai scattato. Senza sapere a che quota si entra non si puo'
 # valutare se la giocata abbia senso.
-ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "1").lower() in {"1", "true", "yes"}
+ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "0").lower() in {"1", "true", "yes"}
 
 # Finestra HT estesa oltre il minuto 20 sotto forte pressione live.
 # Tenere spenta finche' l'analisi shadow (analyze_shadow_signals.py) non conferma WR >= 60%.

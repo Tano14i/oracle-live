@@ -63,3 +63,9 @@ results.csv
 goalscorers.csv
 shootouts.csv
 
+# Scarti di runtime e backup automatici: utili in locale, inutili nel repo.
+*.lock
+supervisor.log
+oracle_brain_v2_backup_*.pkl
+oracle_brain_v2_threshold_backup.txt
+live_training_data_prefix_*.csv
