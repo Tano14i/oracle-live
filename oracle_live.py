@@ -3040,6 +3040,28 @@ def update_live_training_outcome(signal_key: str, outcome: str, close_score: str
         df.loc[mask, "SettledTimeUTC"] = now_utc().isoformat()
         df.to_csv(LIVE_TRAINING_DATA_PATH, index=False)
 
+def update_live_training_odd(signal_key: str, odd: float) -> None:
+    """Scrive la quota reale su una riga gia' accodata.
+
+    La quota live arriva spesso dopo l'apertura del segnale: senza questo la
+    colonna OpenOdd resta vuota e il ROI reale non si puo' calcolare.
+    """
+    with live_training_lock:
+        ensure_live_training_dataset()
+        try:
+            df = pd.read_csv(LIVE_TRAINING_DATA_PATH)
+        except Exception as exc:
+            print(f"Live training dataset read error: {exc}")
+            return
+        if "SignalKey" not in df.columns or "OpenOdd" not in df.columns or df.empty:
+            return
+        mask = df["SignalKey"].astype(str) == str(signal_key)
+        if not mask.any():
+            return
+        df.loc[mask, "OpenOdd"] = float(odd)
+        df.to_csv(LIVE_TRAINING_DATA_PATH, index=False)
+
+
 def format_ml_status() -> str:
     ensure_live_training_dataset()
     if not os.path.exists(TRAINER_DATA_FILE):
@@ -4829,6 +4851,29 @@ def radar_loop() -> None:
                     signal_key = get_signal_key(fixture_id, market)
                     pending_signal = stats["monitor_risultati"].get(signal_key)
                     if pending_signal and pending_signal.get("status") == "pending":
+                        # La quota live di un segnale gia' aperto si cerca finche' non
+                        # si trova. Il book pubblica il mercato in-play intorno al
+                        # minuto 3-10 (mediana 6 su 235 rilevazioni), mentre il bot apre
+                        # al minuto 1-2: al momento dell'apertura il prezzo spesso non
+                        # esiste ancora. Finche' i pendenti venivano riaperti a ogni
+                        # scansione la quota si recuperava per caso; con la riapertura
+                        # chiusa serve chiederla qui, altrimenti il P/L resta sulla quota
+                        # di config e il bilancio si racconta bene da solo.
+                        if not pending_signal.get("open_odd"):
+                            late_odd = fetch_live_market_odd(
+                                fixture_id, headers, market,
+                                int(pending_signal.get("total_goals_at_open", 0) or 0), minute_value,
+                            )
+                            if late_odd:
+                                with state_lock:
+                                    entry = stats["monitor_risultati"].get(signal_key)
+                                    if isinstance(entry, dict) and not entry.get("open_odd"):
+                                        entry["open_odd"] = late_odd
+                                update_live_training_odd(signal_key, late_odd)
+                                log_event(
+                                    "LIVE_ODDS_LATE",
+                                    f"fixture_id={fixture_id} market={market} minute={minute_value} odd={late_odd}",
+                                )
                         if market == MARKET_NEXT_GOAL:
                             start_total_goals = int(pending_signal.get("total_goals_at_open", 0) or 0)
                             if total_goals > start_total_goals:
