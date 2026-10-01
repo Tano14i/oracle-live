@@ -71,6 +71,15 @@ MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
 # pubblicati in una giornata, zero avevano un prezzo registrato, e nessun
 # ODDS_GATE_SKIP e' mai scattato. Senza sapere a che quota si entra non si puo'
 # valutare se la giocata abbia senso.
+# Minuto prima del quale OVER 0.5 HT non apre nulla.
+#
+# Il book pubblica il mercato in-play intorno al minuto 3-10. Misurato sui
+# segnali storici, la quota risulta nota nel 4.8% dei casi aprendo al minuto
+# 1-2 e nel 48.5% aprendo al 9-12: dieci volte piu' spesso. Il valore atteso
+# non cambia (quota mediana meno breakeven: -0.09 al minuto 1-2, -0.08 al 9-12),
+# quindi non si perde niente e si guadagna un prezzo su cui decidere.
+MIN_OPEN_MINUTE_O05_HT = int(get_setting("MIN_OPEN_MINUTE_O05_HT", "9") or "9")
+
 ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "0").lower() in {"1", "true", "yes"}
 
 # Finestra HT estesa oltre il minuto 20 sotto forte pressione live.

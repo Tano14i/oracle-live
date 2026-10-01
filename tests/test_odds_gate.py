@@ -134,3 +134,23 @@ def test_stato_radar_sopravvive_al_salvataggio(ol):
     with open(ol.WEB_DATA_PATH, encoding="utf-8") as handle:
         saved = json.load(handle)
     assert saved["radar_running"] is True
+
+
+def test_finestra_di_apertura_over05(ol):
+    """OVER 0.5 HT non apre prima del minuto configurato.
+
+    Aprire al minuto 1-2 vuol dire decidere prima che il mercato sia
+    prezzabile: la quota risulta nota nel 4,8% dei casi contro il 48,5%
+    aprendo al 9-12, a valore atteso invariato (-0,09 contro -0,08).
+    """
+    assert ol.MIN_OPEN_MINUTE_O05_HT == 9
+
+    # Il candidato normale resta raggiungibile dal minuto consentito in avanti:
+    # il cancello sta nel radar loop, non nelle regole di tier.
+    metrics = {
+        "matches": 40, "avg_total_goals": 2.60, "avg_ht_goals": 1.70,
+        "home_avg_ht_goals": 0.90, "away_avg_ht_goals": 0.90,
+        "home_avg_total_goals": 2.60, "away_avg_total_goals": 2.60,
+    }
+    got = ol.evaluate_signal_candidate(ol.MARKET_OVER05_HT, 9, 0, 0.95, metrics)
+    assert got is not None and got["tier"] == ol.TIER_APPROVED

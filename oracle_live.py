@@ -53,6 +53,7 @@ from config import (
     MIN_ODD_NEXT_GOAL,
     MIN_ODD_O05_HT,
     MIN_ODD_O15_HT,
+    MIN_OPEN_MINUTE_O05_HT,
     ODDS_GATE_STRICT,
     PERFORMANCE_STAKE_EXAMPLE,
     PERFORMANCE_STARTING_BANKROLL,
@@ -2348,6 +2349,8 @@ def get_market_debug_status(
         return f"{market}: PENDING"
     if signal_key in stats["segnali_inviati"]:
         return f"{market}: ALREADY_SENT"
+    if market == MARKET_OVER05_HT and minute_value < MIN_OPEN_MINUTE_O05_HT:
+        return f"{market}: TOO_EARLY minuto {minute_value} < {MIN_OPEN_MINUTE_O05_HT}"
     if oracle_brain is None:
         return f"{market}: NO_MODEL"
 
@@ -4791,6 +4794,7 @@ def radar_loop() -> None:
                 "no_metrics": 0,
                 "pending_or_sent": 0,
                 "market_window": 0,
+                "too_early": 0,
                 "no_model": 0,
                 "odds_skip": 0,
                 "candidate_failed": 0,
@@ -4914,6 +4918,18 @@ def radar_loop() -> None:
                     existing_signal = stats["monitor_risultati"].get(signal_key)
                     if isinstance(existing_signal, dict) and existing_signal.get("status") == "pending":
                         scan_debug["pending_or_sent"] += 1
+                        continue
+                    # Un solo cancello per la finestra di apertura di OVER 0.5 HT,
+                    # messo prima di qualunque valutazione: pubblicazione, shadow,
+                    # snapshot e pre-window passano tutti da qui, quindi nessuno puo'
+                    # prendersi la chiave del segnale prima del minuto consentito e
+                    # bloccare l'apertura vera con la guardia sui pendenti.
+                    #
+                    # Aprire al minuto 1-2 significa decidere prima che il mercato sia
+                    # prezzabile: la quota risulta nota nel 4.8% dei casi contro il
+                    # 48.5% aprendo al 9-12, a valore atteso invariato.
+                    if market == MARKET_OVER05_HT and minute_value < MIN_OPEN_MINUTE_O05_HT:
+                        scan_debug["too_early"] += 1
                         continue
                     if opened_primary_signal:
                         log_event("MARKET_ROUTER_SKIP", f"fixture_id={fixture_id} market={market} routed_to_primary=1 minute={minute_value} score={score}")
@@ -5288,6 +5304,7 @@ def radar_loop() -> None:
                 f"no_metrics={scan_debug['no_metrics']} "
                 f"pending_or_sent={scan_debug['pending_or_sent']} "
                 f"market_window={scan_debug['market_window']} "
+                f"too_early={scan_debug['too_early']} "
                 f"no_model={scan_debug['no_model']} "
                 f"candidate_failed={scan_debug['candidate_failed']} "
                 f"odds_skip={scan_debug.get('odds_skip', 0)} "
