@@ -17,6 +17,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score,
@@ -73,6 +74,74 @@ FEATURE_COLUMNS = [
 # ---------------------------------------------------------------------------
 # Filtro dataset
 # ---------------------------------------------------------------------------
+
+ISOTONIC_MIN_ROWS = 300   # sotto questa soglia isotonic sovradatta: si usa sigmoid
+
+
+def build_forest() -> RandomForestClassifier:
+    """La foresta regolarizzata, in un posto solo.
+
+    Validazione e produzione devono usare gli stessi vincoli: cambiarli fra le due
+    rende il giudizio inutile, e tenerli in due punti li fa divergere.
+    """
+    return RandomForestClassifier(
+        n_estimators=300,
+        random_state=42,
+        max_depth=8,
+        min_samples_leaf=30,
+        max_features="sqrt",
+        class_weight="balanced",
+    )
+
+
+def build_calibrated_model(n_rows: int, min_class_count: int | None = None):
+    """Foresta con probabilita' calibrate.
+
+    Un 0.80 di un Random Forest grezzo e' la frazione di alberi che ha votato si',
+    non una probabilita': non si puo' confrontare con il breakeven di una quota.
+    Misurato sui segnali pubblicati, la correlazione fra probabilita' del modello ed
+    esito era 0.016, cioe' nulla. Senza calibrazione ogni regola costruita sul
+    prodotto probabilita' x quota amplifica l'errore del modello invece di
+    selezionare valore: simulato sui dati reali, un gate a valore atteso portava il
+    ROI da -12% a -26%.
+
+    Se la classe minoritaria ha meno campioni delle fold la calibrazione non e'
+    possibile: si torna alla foresta nuda invece di far fallire il retrain.
+    """
+    base = build_forest()
+    method = "isotonic" if n_rows >= ISOTONIC_MIN_ROWS else "sigmoid"
+    cv = 5 if n_rows >= 100 else 3
+    if min_class_count is not None:
+        cv = min(cv, int(min_class_count))
+    if cv < 2:
+        return base
+    return CalibratedClassifierCV(base, method=method, cv=cv)
+
+
+def reliability_table(probs, y_true, bins: int = 5) -> list:
+    """Per ogni fascia di probabilita' predetta: quanti segnali e win rate reale.
+
+    E' il modo di leggere se un 0.80 del modello vale davvero l'80%. Senza questa
+    tabella la calibrazione resta un'affermazione.
+    """
+    probs = np.asarray(probs, dtype=float)
+    y_true = np.asarray(y_true, dtype=int)
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    rows = []
+    for i in range(bins):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (probs >= lo) & (probs < hi) if i < bins - 1 else (probs >= lo) & (probs <= hi)
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        rows.append({
+            "bin": f"{lo:.1f}-{hi:.1f}",
+            "n": n,
+            "mean_prob": round(float(probs[mask].mean()), 3),
+            "real_wr": round(float(y_true[mask].mean()), 3),
+        })
+    return rows
+
 
 def apply_training_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
@@ -249,14 +318,7 @@ def train_oracle_v2() -> dict:
         # campioni, 300 alberi su ~2.600 righe memorizzano il periodo di
         # addestramento: il modello precedente correlava +0.33 in campione e
         # -0.17 fuori.
-        val_model = RandomForestClassifier(
-            n_estimators=300,
-            random_state=42,
-            max_depth=8,
-            min_samples_leaf=30,
-            max_features="sqrt",
-            class_weight="balanced",
-        )
+        val_model = build_calibrated_model(len(X_train), int(y_train.value_counts().min()))
         val_model.fit(X_train, y_train)
 
         # Soglia scelta sulla fascia di validazione, non sul test.
@@ -294,7 +356,16 @@ def train_oracle_v2() -> dict:
             "wr_rejected": round(wr_rejected * 100, 2),
             "signals_above_threshold": n_selected,
             "lift_test": round(lift_test * 100, 2),
+            "calibration": getattr(val_model, "method", "nessuna"),
+            "reliability": reliability_table(test_probs, y_test),
         }
+
+        print()
+        print("Tabella di affidabilita' (probabilita' predetta -> win rate reale):")
+        print(f"  calibrazione: {validation['calibration']}")
+        for row in validation["reliability"]:
+            print(f"    {row['bin']}  n={row['n']:<4} predetto {row['mean_prob']:.3f}"
+                  f" -> reale {row['real_wr']:.3f}")
 
         print(f"\nGiudizio sulla fascia di test (mai usata prima):")
         print(f"  soglia scelta in validazione: {optimal_threshold}")
@@ -320,14 +391,7 @@ def train_oracle_v2() -> dict:
 
     # Il modello finale usa gli stessi vincoli di quello validato: cambiare
     # iperparametri fra validazione e produzione renderebbe il giudizio inutile.
-    final_model = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        max_depth=8,
-        min_samples_leaf=30,
-        max_features="sqrt",
-        class_weight="balanced",
-    )
+    final_model = build_calibrated_model(len(X), int(y.value_counts().min()))
     final_model.fit(X, y)
 
     if promote and len(clean) >= MIN_PRODUCTION_ROWS:
@@ -348,7 +412,18 @@ def train_oracle_v2() -> dict:
         f.write(str(optimal_threshold))
     print(f"Soglia salvata in: {threshold_path}")
 
-    importances = dict(zip(FEATURE_COLUMNS, final_model.feature_importances_))
+    # Il wrapper calibrato non espone feature_importances_: si media sugli alberi
+    # interni. Senza questo il report del retrain resterebbe muto.
+    try:
+        if hasattr(final_model, "calibrated_classifiers_"):
+            inner = [cc.estimator for cc in final_model.calibrated_classifiers_]
+            importances = dict(zip(FEATURE_COLUMNS,
+                                   np.mean([m.feature_importances_ for m in inner], axis=0)))
+        else:
+            importances = dict(zip(FEATURE_COLUMNS, final_model.feature_importances_))
+    except Exception as exc:
+        print(f"Feature importances non disponibili: {exc}")
+        importances = {}
     result["feature_importances"] = importances
     result["validation"] = validation
     result["model_path"] = target_path

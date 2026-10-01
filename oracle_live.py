@@ -54,6 +54,10 @@ from config import (
     MIN_ODD_O05_HT,
     MIN_ODD_O15_HT,
     MIN_OPEN_MINUTE_O05_HT,
+    LONG_ODDS_SAMPLING,
+    LONG_ODDS_MIN,
+    LONG_ODDS_MAX,
+    LONG_ODDS_PER_SCAN,
     ODDS_GATE_STRICT,
     PERFORMANCE_STAKE_EXAMPLE,
     PERFORMANCE_STARTING_BANKROLL,
@@ -227,11 +231,25 @@ VIP_SYNC_INTERVAL_SECONDS = 600
 # maggiore delle scansioni - statistiche live, predizione del modello e richiesta
 # quote per ogni partita - sottraendola all'unico market con margine positivo.
 # I 24.000 esiti gia' raccolti restano nel dataset per eventuali analisi future.
+#
+# Aggiornamento 01/10/2026, su 105 segnali chiusi con quota reale registrata: la
+# frase 'unico market con margine positivo' qui sopra non regge piu'. OVER 0.5 HT
+# rende -11.5% a quote reali (WR 60.0% contro il 68.8% implicito nel prezzo).
+# Nessun market misurato ha margine positivo. NEXT GOAL resta spento perche' la
+# sua quota mediana e' 1.04, cioe' serve il 96.2% contro un tetto fisico
+# dell'evento intorno al 90%: non e' taratura, e' aritmetica, e piu' dati non la
+# cambiano.
 MARKETS_DISABLED = {MARKET_NEXT_GOAL}
 
-# Market ancora valutati ma non pubblicabili: nessuno al momento. Serve quando si
-# vuole continuare a raccogliere il dato senza scommetterlo.
-MARKETS_SHADOW_ONLY: set[str] = set()
+# Market valutati ma mai pubblicati: si continua a raccogliere il dato senza
+# scommetterlo.
+#
+# OVER 1.5 HT sta qui invece che fra i disabilitati perche' costa poco - gira
+# sulle stesse partite e sulle stesse statistiche di OVER 0.5 HT - e perche' il
+# suo campione e' magro: 334 segnali, quota mediana 2.10, serve il 47.6% e
+# misura il 16.7%. Spegnerlo del tutto chiuderebbe l'unica fascia di quota lunga
+# su cui abbiamo osservazioni, che e' proprio quella da indagare.
+MARKETS_SHADOW_ONLY: set[str] = {MARKET_OVER15_HT}
 
 FREE_ALLOWED_TIERS = {TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING}
 AUTO_MARKET_SWITCH_ENABLED = True
@@ -2805,16 +2823,34 @@ def compute_performance_snapshot() -> dict:
         if not df_perf.empty and all(column in df_perf.columns for column in ["SignalKey", "Market", "Tier", "Outcome"]):
             public_tiers = {TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING}
             settled_mask = df_perf["Outcome"].isin(["WIN", "LOSS"]) & df_perf["Tier"].isin(public_tiers)
-            df_perf = df_perf.loc[settled_mask, ["SignalKey", "Market", "Outcome"]].copy()
+            keep_columns = ["SignalKey", "Market", "Outcome"]
+            if "OpenOdd" in df_perf.columns:
+                keep_columns.append("OpenOdd")
+            df_perf = df_perf.loc[settled_mask, keep_columns].copy()
             if not df_perf.empty:
                 df_perf["SignalKey"] = df_perf["SignalKey"].astype(str)
                 df_perf["Market"] = df_perf["Market"].fillna("UNKNOWN").astype(str)
-                df_perf = df_perf.drop_duplicates(subset=["SignalKey"], keep="last")
+                # keep="first": la prima riga di un segnale e' quella scattata al
+                # momento della decisione. Le copie tardive portano uno stato a
+                # partita avanzata sotto colonne che si chiamano "AtOpen".
+                df_perf = df_perf.drop_duplicates(subset=["SignalKey"], keep="first")
+                if "OpenOdd" not in df_perf.columns:
+                    df_perf["OpenOdd"] = float("nan")
+                df_perf["OpenOdd"] = pd.to_numeric(df_perf["OpenOdd"], errors="coerce")
                 for market_name, df_market in df_perf.groupby("Market"):
                     wins = int((df_market["Outcome"] == "WIN").sum())
                     losses = int((df_market["Outcome"] == "LOSS").sum())
                     market_settled = wins + losses
-                    market_profit = ((wins * (get_market_quota(market_name) - 1)) - losses) * tracked_stake if tracked_stake else 0.0
+                    # P/L sulla quota realmente esposta dal book dove c'e', sul
+                    # fallback di config dove manca. Prima usava sempre il fallback,
+                    # che su OVER 0.5 HT e' 1.45 contro una mediana reale di 1.36:
+                    # il report si raccontava bene da solo.
+                    odds_series = df_market["OpenOdd"].where(df_market["OpenOdd"] > 1.0)
+                    priced_count = int(odds_series.notna().sum())
+                    effective = odds_series.fillna(get_market_quota(market_name))
+                    is_win = df_market["Outcome"] == "WIN"
+                    real_profit = float(((effective - 1.0).where(is_win, -1.0)).sum()) * tracked_stake
+                    market_profit = real_profit if tracked_stake else 0.0
                     market_roi = (market_profit / (market_settled * tracked_stake) * 100) if market_settled and tracked_stake else 0.0
                     by_market.append({
                         "market": market_name,
@@ -2824,11 +2860,14 @@ def compute_performance_snapshot() -> dict:
                         "profit": market_profit,
                         "roi": market_roi,
                         "win_rate": (wins / market_settled * 100) if market_settled else 0.0,
+                        "priced": priced_count,
                     })
                 by_market.sort(key=lambda item: (-item["settled_total"], item["market"]))
     except Exception:
         by_market = []
+    priced_total = sum(int(item.get("priced", 0)) for item in by_market)
     return {
+        "priced_total": priced_total,
         "wins": total_wins,
         "losses": total_losses,
         "settled_total": settled_total,
@@ -2866,6 +2905,7 @@ def format_performance_report(audience: str = "vip") -> str:
             f"<b>Settled signals:</b> {snapshot['settled_total']}\n"
             f"<b>Win Rate:</b> {snapshot['win_rate']:.1f}%\n"
             f"<b>ROI:</b> {snapshot['roi']:.1f}%\n"
+            f"<b>Quota reale su:</b> {snapshot['priced_total']}/{snapshot['settled_total']} segnali\n"
             f"<b>Units:</b> {snapshot['units']:+.2f}u (1u = {snapshot['tracked_stake']:.0f} EUR)\n"
             f"<b>{snapshot['sample_stake']:.0f} EUR flat equivalent:</b> bankroll {snapshot['sample_bankroll']:.0f} EUR\n"
             f"{SEPARATOR}\n"
@@ -2880,6 +2920,7 @@ def format_performance_report(audience: str = "vip") -> str:
             f"<b>WIN:</b> {snapshot['wins']} | <b>LOSS:</b> {snapshot['losses']}\n"
             f"<b>Win Rate:</b> {snapshot['win_rate']:.1f}%\n"
             f"<b>ROI:</b> {snapshot['roi']:.1f}%\n"
+            f"<b>Quota reale su:</b> {snapshot['priced_total']}/{snapshot['settled_total']} segnali\n"
             f"<b>Units:</b> {snapshot['units']:+.2f}u (1u = {snapshot['tracked_stake']:.0f} EUR)\n"
             f"<b>Live profit (tracked @ {snapshot['tracked_stake']:.0f} EUR flat):</b> {snapshot['profit']:+.2f} EUR\n"
             f"<b>{snapshot['sample_stake']:.0f} EUR flat equivalent:</b> bankroll {snapshot['sample_bankroll']:.0f} EUR\n"
@@ -2896,6 +2937,7 @@ def format_performance_report(audience: str = "vip") -> str:
         f"<b>WIN:</b> {snapshot['wins']} | <b>LOSS:</b> {snapshot['losses']}\n"
         f"<b>Win Rate:</b> {snapshot['win_rate']:.1f}%\n"
         f"<b>ROI:</b> {snapshot['roi']:.1f}%\n"
+        f"<b>Quota reale su:</b> {snapshot['priced_total']}/{snapshot['settled_total']} segnali\n"
         f"<b>Units:</b> {snapshot['units']:+.2f}u (1u = {snapshot['tracked_stake']:.0f} EUR)\n"
         f"<b>Live profit (tracked @ {snapshot['tracked_stake']:.0f} EUR flat):</b> {snapshot['profit']:+.2f} EUR\n"
         f"<b>{snapshot['sample_stake']:.0f} EUR flat equivalent:</b> bankroll {snapshot['sample_bankroll']:.0f} EUR\n"
@@ -4765,6 +4807,63 @@ def record_signal_delivery(signal_key: str, tier: str, full_message: str, free_m
     return deliveries
 
 
+def evaluate_long_odds_sample(market: str, minute_value: int, total_goals: int, prob: float,
+                              fixture_id: int, headers: dict, scan_debug: dict):
+    """Apre uno shadow sulle partite a quota lunga, che le regole di ritmo non vedono.
+
+    Le soglie di ritmo selezionano coppie da gol, quindi la fascia 1.60-2.50 non
+    viene mai campionata. E' l'unica fascia del dataset con segno positivo
+    (3 segnali, ROI +79%) e quella dove il margine del book pesa meno in
+    proporzione. A n=3 non prova niente: senza campionarla non si sapra' mai.
+
+    Restituisce sempre un tier LEARNING, quindi non pubblica: compra informazione
+    senza rischiare. Il tetto per scansione tiene il costo in chiamate sotto
+    controllo, e la quota viene chiesta solo dopo i filtri gratuiti.
+    """
+    if not LONG_ODDS_SAMPLING:
+        return None
+    if scan_debug.get("long_odds_sampled", 0) >= LONG_ODDS_PER_SCAN:
+        return None
+    # Solo dove il market ha senso, e solo nella finestra utile: ogni filtro qui
+    # e' gratis, la chiamata quote no.
+    # Il motivo del rifiuto viene registrato: un campionatore che tace non si
+    # distingue da un campionatore morto, e questo e' esattamente il dubbio che
+    # e' costato tempo la prima volta.
+    if market == MARKET_OVER05_HT:
+        if total_goals != 0 or not MIN_OPEN_MINUTE_O05_HT <= minute_value <= 35:
+            log_event("LONG_ODDS_SKIP", f"fixture_id={fixture_id} market={market}"
+                                        f" minute={minute_value} goals={total_goals} fuori finestra")
+            return None
+    elif market == MARKET_OVER15_HT:
+        if total_goals != 1 or not 1 <= minute_value <= 40:
+            log_event("LONG_ODDS_SKIP", f"fixture_id={fixture_id} market={market}"
+                                        f" minute={minute_value} goals={total_goals} fuori finestra")
+            return None
+    else:
+        return None
+
+    live_odd = fetch_live_market_odd(fixture_id, headers, market, total_goals, minute_value)
+    scan_debug["long_odds_sampled"] = scan_debug.get("long_odds_sampled", 0) + 1
+    if live_odd is None:
+        return None
+    try:
+        odd_value = float(live_odd)
+    except (TypeError, ValueError):
+        return None
+    if not LONG_ODDS_MIN <= odd_value <= LONG_ODDS_MAX:
+        return None
+
+    scan_debug["long_odds_opened"] = scan_debug.get("long_odds_opened", 0) + 1
+    log_event(
+        "LONG_ODDS_SAMPLE",
+        f"fixture_id={fixture_id} market={market} minute={minute_value} odd={odd_value:.2f} prob={prob:.3f}",
+    )
+    return {
+        "tier": TIER_LEARNING,
+        "reason": f"long-odds sample | quota {odd_value:.2f} | model {prob:.2f}",
+    }
+
+
 def radar_loop() -> None:
     global running
     url = "https://v3.football.api-sports.io/fixtures"
@@ -4795,6 +4894,8 @@ def radar_loop() -> None:
                 "pending_or_sent": 0,
                 "market_window": 0,
                 "too_early": 0,
+                "long_odds_sampled": 0,
+                "long_odds_opened": 0,
                 "no_model": 0,
                 "odds_skip": 0,
                 "candidate_failed": 0,
@@ -5005,6 +5106,17 @@ def radar_loop() -> None:
                     if not market_in_window:
                         clear_pending_signal_tracker(signal_key)
                         assessment = evaluate_prewindow_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                        # Seconda occasione per il campionamento delle quote lunghe:
+                        # fuori finestra di mercato ci sono proprio le partite che le
+                        # regole di ritmo non vogliono, ed e' li' che le quote si
+                        # allungano. Senza questo innesto il campionatore resterebbe
+                        # muto: la finestra di mercato scarta prima che la catena dei
+                        # candidati venga raggiunta.
+                        if not assessment:
+                            assessment = evaluate_long_odds_sample(
+                                market, minute_value, total_goals, prob,
+                                fixture_id, headers, scan_debug,
+                            )
                         if not assessment:
                             scan_debug["market_window"] += 1
                             continue
@@ -5075,6 +5187,11 @@ def radar_loop() -> None:
                                 assessment = evaluate_learning_candidate(market, minute_value, total_goals, prob, combined_metrics)
                             if not assessment:
                                 assessment = evaluate_snapshot_candidate(market, minute_value, total_goals, prob, combined_metrics)
+                            if not assessment:
+                                assessment = evaluate_long_odds_sample(
+                                    market, minute_value, total_goals, prob,
+                                    fixture_id, headers, scan_debug,
+                                )
                             if not assessment:
                                 scan_debug["candidate_failed"] += 1
                                 continue
@@ -5305,6 +5422,7 @@ def radar_loop() -> None:
                 f"pending_or_sent={scan_debug['pending_or_sent']} "
                 f"market_window={scan_debug['market_window']} "
                 f"too_early={scan_debug['too_early']} "
+                f"long_odds={scan_debug['long_odds_opened']}/{scan_debug['long_odds_sampled']} "
                 f"no_model={scan_debug['no_model']} "
                 f"candidate_failed={scan_debug['candidate_failed']} "
                 f"odds_skip={scan_debug.get('odds_skip', 0)} "

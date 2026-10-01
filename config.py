@@ -56,7 +56,17 @@ QUOTA = float(get_setting("QUOTA", "1.75") or "1.75")
 # 1.40-1.53 al minuto 1-5, 1.57-1.73 al 18-21, 2.10 al 28.
 QUOTA_O05_HT = float(get_setting("QUOTA_O05_HT", "1.45") or "1.45")
 QUOTA_O15_HT = float(get_setting("QUOTA_O15_HT", "1.50") or "1.50")
-QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", str(QUOTA)) or str(QUOTA))
+# Quote di fallback, usate per il P/L quando il book non espone la quota live.
+#
+# Regola: mai sopra la mediana misurata. Un fallback generoso non rende il bot
+# piu' redditizio, rende il report una bugia. QUOTA_NEXT_GOAL valeva 1.75 (il
+# QUOTA generico) contro una mediana reale di 1.04 su 39 segnali prezzati: il
+# report per market mostrava +59.9% di ROI su un market che misura -3.9%.
+#
+# Mediane misurate il 01/10/2026: OVER 0.5 HT 1.50 (n=61), NEXT GOAL 1.04
+# (n=39), OVER 1.5 HT 2.10 (n=6). I fallback di OVER 0.5 e OVER 1.5 restano
+# sotto la mediana, quindi prudenti.
+QUOTA_NEXT_GOAL = float(get_setting("QUOTA_NEXT_GOAL", "1.04") or "1.04")
 
 # Filtro quote: quota live minima per pubblicare un segnale.
 # Sotto questi valori il segnale non copre il proprio breakeven e viene scartato.
@@ -79,6 +89,19 @@ MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
 # non cambia (quota mediana meno breakeven: -0.09 al minuto 1-2, -0.08 al 9-12),
 # quindi non si perde niente e si guadagna un prezzo su cui decidere.
 MIN_OPEN_MINUTE_O05_HT = int(get_setting("MIN_OPEN_MINUTE_O05_HT", "9") or "9")
+# Campionamento deliberato delle quote lunghe.
+#
+# Le regole di ritmo selezionano partite da gol, quindi il bot non vede mai la
+# fascia di quota 1.60-2.50. E' l'unica cella del dataset con segno positivo
+# (3 segnali, ROI +79%) e l'unica dove la teoria dice che il margine del book
+# pesa meno: a n=3 non prova niente, e senza campionarla non lo prova mai.
+#
+# Apre solo shadow, mai pubblicato: compra informazione senza rischiare.
+LONG_ODDS_SAMPLING = get_setting("LONG_ODDS_SAMPLING", "1").lower() in {"1", "true", "yes"}
+LONG_ODDS_MIN = float(get_setting("LONG_ODDS_MIN", "1.60") or "1.60")
+LONG_ODDS_MAX = float(get_setting("LONG_ODDS_MAX", "2.50") or "2.50")
+LONG_ODDS_PER_SCAN = int(get_setting("LONG_ODDS_PER_SCAN", "2") or "2")
+
 
 ODDS_GATE_STRICT = get_setting("ODDS_GATE_STRICT", "0").lower() in {"1", "true", "yes"}
 
