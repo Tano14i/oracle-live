@@ -250,10 +250,15 @@ def run():
                             entry["followed_up"] = True
                             save_state(state)
 
-            # pulizia: rimuovi fixture non piu' live da tempo (evita crescita infinita dello stato)
+            # Pulizia: rimuovi ogni fixture non piu' live, indipendentemente da
+            # fired/followed_up. Una volta che la partita esce dall'elenco live
+            # (finita, o sparita dal feed), non c'e' piu' nessun follow-up da
+            # fare — tenerla in stato in attesa di un followed_up che per le
+            # partite mai "fired" non arriva mai era la causa di una crescita
+            # senza limite del file nel tempo.
             live_ids = {str(f["fixture"]["id"]) for f in live_fixtures}
             for fid in list(state["triggered"].keys()):
-                if fid not in live_ids and state["triggered"][fid].get("followed_up", True):
+                if fid not in live_ids:
                     state["triggered"].pop(fid, None)
             save_state(state)
 
