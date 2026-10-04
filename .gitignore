@@ -69,3 +69,10 @@ supervisor.log
 oracle_brain_v2_backup_*.pkl
 oracle_brain_v2_threshold_backup.txt
 live_training_data_prefix_*.csv
+
+# Soglie dei tier: artefatto del retrain, come il file della soglia.
+oracle_brain_v2_tiers.txt
+
+# Confronto quote personale: contiene cosa hai giocato e a che prezzo.
+# Non ha niente a che fare con il codice e non va su un repo pubblico.
+book_comparison.csv
