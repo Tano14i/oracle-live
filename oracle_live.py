@@ -143,6 +143,7 @@ TITAN_PRESSURE_MODEL_PATH = os.path.join(BASE_DIR, "titan_pressure_model.pkl")
 # --- Modello v2 con soglia ottimale ---
 V2_MODEL_PATH = os.path.join(BASE_DIR, "oracle_brain_v2.pkl")
 V2_THRESHOLD_PATH = os.path.join(BASE_DIR, "oracle_brain_v2_threshold.txt")
+V2_TIERS_PATH = os.path.join(BASE_DIR, "oracle_brain_v2_tiers.txt")
 # Soglia 0 = il modello non filtra piu' la pubblicazione. Fuori dal periodo su cui
 # e' stato addestrato la sua probabilita' e' anticorrelata con l'esito (-0.17 su
 # 2.350 segnali chiusi): sopra 0.71 il win rate era 46.8%, sotto 69.5%. Il
@@ -346,6 +347,44 @@ TIER_MIN_ODDS_BY_MARKET = {
     MARKET_OVER05_HT: {TIER_APPROVED: 2.40, TIER_CAUTION: 1.70, TIER_GAMBLING: 1.60},
     MARKET_NEXT_GOAL: {TIER_APPROVED: 1.20, TIER_CAUTION: 1.40, TIER_GAMBLING: 1.20},
 }
+
+
+# Ordine dei tier, per poter prendere il piu' prudente fra due giudizi.
+TIER_RANK = {TIER_GAMBLING: 0, TIER_CAUTION: 1, TIER_APPROVED: 2}
+
+# Percentili della distribuzione del modello in produzione, scritti dal retrain.
+# I valori di partenza sono le vecchie costanti: se il file manca il
+# comportamento resta quello di prima invece di diventare imprevedibile.
+TIER_PROB_CUTS_DEFAULT = (0.56, 0.60)
+tier_prob_cuts = TIER_PROB_CUTS_DEFAULT
+
+
+def get_tier_prob_cuts() -> tuple:
+    """(soglia CAUTION, soglia APPROVED) sulla probabilita' del modello."""
+    return tier_prob_cuts
+
+
+def load_tier_prob_cuts() -> None:
+    """Legge i percentili scritti dal retrain.
+
+    Senza questo le soglie restano costanti mentre la distribuzione del modello
+    si sposta a ogni riaddestramento: e' cosi' che il tier GAMBLING si e'
+    azzerato e la condizione di probabilita' e' diventata sempre vera.
+    """
+    global tier_prob_cuts
+    try:
+        with open(V2_TIERS_PATH, "r") as handle:
+            parts = [float(x) for x in handle.read().split()]
+        if len(parts) == 2 and 0.0 < parts[0] <= parts[1] < 1.0:
+            tier_prob_cuts = (parts[0], parts[1])
+            log_event("BOOT", f"Soglie tier da percentili: CAUTION {parts[0]:.3f} | APPROVED {parts[1]:.3f}")
+            return
+        log_event("BOOT", f"File soglie tier malformato, uso i valori di partenza {TIER_PROB_CUTS_DEFAULT}")
+    except FileNotFoundError:
+        log_event("BOOT", f"Soglie tier: nessun file, uso i valori di partenza {TIER_PROB_CUTS_DEFAULT}")
+    except Exception as exc:
+        log_event("BOOT", f"Soglie tier non leggibili ({exc}), uso i valori di partenza")
+    tier_prob_cuts = TIER_PROB_CUTS_DEFAULT
 
 
 def get_min_live_odd(market: str, tier: str | None = None) -> float:
@@ -1883,30 +1922,40 @@ def evaluate_signal_candidate(market: str, minute_value: int, total_goals: int, 
             return None
         if min(home_ht, away_ht) < 0.80:
             return None
-        # Soglie di probabilita' allineate al modello attuale, non a quello vecchio.
-        # Il modello regolarizzato produce una distribuzione stretta (media 0.52,
-        # deviazione 0.077): con i vecchi valori 0.88/0.80/0.72 passerebbe lo 0.1%
-        # dei casi e i segnali si azzererebbero. 0.60/0.56/0.50 corrispondono al
-        # 16%, 31% e 62% della distribuzione, e 0.56 e' la soglia che il
-        # riaddestramento ha validato fuori campione.
-        # Il ritmo resta il criterio primario: e' l'unico validato su 357.573
-        # partite con gruppo di controllo.
-        if prob >= 0.60 and avg_total_goals >= 2.35 and avg_ht_goals >= 1.60:
-            return {
-                "tier": TIER_APPROVED,
-                "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | 0-0 with time window still strong",
-            }
-        if prob >= 0.56 and avg_total_goals >= 2.20 and avg_ht_goals >= 1.30:
-            return {
-                "tier": TIER_CAUTION,
-                "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | setup still tradable",
-            }
-        if prob >= 0.50 and avg_total_goals >= 2.08 and avg_ht_goals >= 1.10 and min(home_ht, away_ht) >= 0.80:
-            return {
-                "tier": TIER_GAMBLING,
-                "reason": f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f} | aggressive early HT value setup",
-            }
-        return None
+        # Il tier e' il MINORE fra due giudizi: il ritmo storico e la convinzione
+        # del modello. Finche' dipendeva solo dal ritmo, il modello non ci entrava.
+        #
+        # Le soglie fisse 0.60/0.56/0.50 erano tarate su un modello con media 0.52.
+        # Dopo la calibrazione i segnali pubblicati stanno fra 0.861 e 0.918: le
+        # superavano tutte e tre il 100% delle volte, quindi la condizione di
+        # probabilita' era lettera morta e il tier diventava una classificazione di
+        # ritmo con un'etichetta che promette altro. GAMBLING si e' azzerato perche'
+        # la sua fascia di ritmo (1.10-1.30) e' esclusa dal pre-filtro qui sopra.
+        #
+        # Ora le soglie di probabilita' vengono dai percentili della distribuzione
+        # del modello in produzione, scritti dal retrain: un riaddestramento che
+        # sposta la distribuzione non svuota piu' i tier.
+        if prob < 0.50:
+            return None
+        pace_tier = (
+            TIER_APPROVED if (avg_total_goals >= 2.35 and avg_ht_goals >= 1.60)
+            else TIER_CAUTION if (avg_total_goals >= 2.20 and avg_ht_goals >= 1.30)
+            else TIER_GAMBLING
+        )
+        cut_caution, cut_approved = get_tier_prob_cuts()
+        prob_tier = (
+            TIER_APPROVED if prob >= cut_approved
+            else TIER_CAUTION if prob >= cut_caution
+            else TIER_GAMBLING
+        )
+        # Il piu' prudente dei due: un segnale di cui il modello non e' convinto non
+        # esce APPROVED solo perche' la coppia segna molto, e viceversa.
+        tier = min(pace_tier, prob_tier, key=TIER_RANK.get)
+        return {
+            "tier": tier,
+            "reason": (f"HT pace {avg_ht_goals:.2f} | total pace {avg_total_goals:.2f}"
+                       f" | model {prob:.2f} | ritmo {pace_tier} / modello {prob_tier}"),
+        }
 
     if market == MARKET_OVER15_HT:
         if total_goals != 1 or not 1 <= minute_value <= 44:
@@ -5898,6 +5947,9 @@ if __name__ == "__main__":
             oracle_v2_threshold = V2_DEFAULT_THRESHOLD
             print("AI model non trovato.")
             log_event("BOOT", "Model not found; running without ML model")
+
+    # Le soglie dei tier seguono la distribuzione del modello appena caricato.
+    load_tier_prob_cuts()
 
     try:
         titan_pressure_brain = joblib.load(TITAN_PRESSURE_MODEL_PATH)

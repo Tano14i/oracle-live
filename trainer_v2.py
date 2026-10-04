@@ -293,6 +293,7 @@ def train_oracle_v2() -> dict:
     # campione selezionava al contrario (46.8% sopra soglia, 69.5% sotto).
     validation = {}
     optimal_threshold = 0.5
+    test_probs = None
     promote = False
     promote_reason = "validazione non eseguita: dataset troppo piccolo"
 
@@ -411,6 +412,30 @@ def train_oracle_v2() -> dict:
     with open(threshold_path, "w") as f:
         f.write(str(optimal_threshold))
     print(f"Soglia salvata in: {threshold_path}")
+
+    # Soglie dei tier dai percentili della distribuzione di QUESTO modello.
+    #
+    # Con soglie fisse il tier si svuota appena il riaddestramento sposta la
+    # distribuzione: le vecchie 0.60/0.56/0.50 erano tarate su una media di 0.52 e
+    # dopo la calibrazione venivano superate dal 100% dei segnali pubblicati, il che
+    # ha reso GAMBLING irraggiungibile e la condizione di probabilita' sempre vera.
+    # Prendendo i percentili fra i segnali che superano la soglia di pubblicazione,
+    # i tre tier restano popolati per costruzione.
+    tiers_path = str(Path(target_path).with_suffix("")) + "_tiers.txt"
+    try:
+        above = np.asarray(test_probs, dtype=float)
+        above = above[above >= optimal_threshold]
+        if above.size >= 20:
+            cut_caution, cut_approved = (float(x) for x in np.percentile(above, [33, 66]))
+            with open(tiers_path, "w") as f:
+                f.write(f"{cut_caution:.4f} {cut_approved:.4f}")
+            print(f"Soglie tier salvate in: {tiers_path}"
+                  f"  (CAUTION {cut_caution:.3f} | APPROVED {cut_approved:.3f})")
+            result["tier_prob_cuts"] = [round(cut_caution, 4), round(cut_approved, 4)]
+        else:
+            print(f"Soglie tier non aggiornate: solo {above.size} segnali sopra la soglia")
+    except Exception as exc:
+        print(f"Soglie tier non calcolabili: {exc}")
 
     # Il wrapper calibrato non espone feature_importances_: si media sugli alberi
     # interni. Senza questo il report del retrain resterebbe muto.
