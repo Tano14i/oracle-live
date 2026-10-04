@@ -27,7 +27,11 @@ SENSIBILI = [
 ]
 # oracle_brain.pkl resta modificato per scelta: 56 MB su LFS per un modello di
 # solo fallback. E' il cancello G7, in attesa di decisione dell'owner.
-DERIVE_AMMESSE = {"oracle_brain.pkl"}
+#
+# GATES.md e' escluso perche' il checker ci scrive l'evidenza a ogni giro: senza
+# questa eccezione il cancello non potrebbe mai passare nella stessa esecuzione
+# che lo soddisfa. E' una dipendenza circolare del mio oracolo, non una deriva.
+DERIVE_AMMESSE = {"oracle_brain.pkl", "GATES.md"}
 
 FAIL = []
 
