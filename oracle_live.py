@@ -29,6 +29,7 @@ import requests
 import telebot
 from telebot import types
 
+from log_setup import build_file_handler
 from config import (
     API_KEY,
     AUTO_RETRAIN_EVERY_N_SETTLED,
@@ -207,9 +208,11 @@ missing_team_queue = {}
 logger = logging.getLogger("oracle_live")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
-    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding="utf-8")
-    file_handler.setFormatter(logging.Formatter("%(asctime)sZ | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(file_handler)
+    # Handler in log_setup: ruota con un tetto di 50 MB, scrive l'ora in UTC
+    # (la Z del formato era appiccicata a un orario locale) e sopprime le
+    # ripetizioni consecutive identiche. I 191 MB del 30 settembre erano per
+    # il 99% la stessa riga POLLING_RESTART ogni cinque secondi.
+    logger.addHandler(build_file_handler(LOG_FILE_PATH))
 logger.propagate = False
 PROCESS_LOCK_PATH = os.path.join(BASE_DIR, 'oracle_live.lock')
 process_lock_handle = None
