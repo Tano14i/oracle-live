@@ -19,6 +19,7 @@ Uso:
 """
 import argparse
 import math
+import os
 import sys
 
 import numpy as np
@@ -91,6 +92,76 @@ def table(groups, min_n: int) -> None:
               f"{100 * (wr - imp):>+9.1f}{100 * g['pl'].mean():>9.1f}")
     if not shown:
         print(f"  (nessun segmento con almeno {min_n} segnali prezzati)")
+
+
+def trajectories(csv_path: str, min_n: int) -> None:
+    """L'effetto dell'attesa, per singolo segnale invece che per mediane.
+
+    La domanda e': se entro W minuti dopo il segnale, prendo un prezzo migliore
+    ma perdo i vincenti il cui gol e' arrivato prima. Il saldo si misura solo
+    appaiando, sullo STESSO segnale, la quota a quel momento e l'esito finale.
+
+    Stimarlo con una quota mediana e un rincaro uniforme - come e' stato fatto
+    la prima volta - mescola popolazioni diverse e da' un numero che sembra
+    preciso e non lo e'.
+
+    La chiave del segnale e' FixtureId + Market, quindi odds_history.csv si
+    appaia al dataset senza bisogno di una colonna in piu'.
+    """
+    if not os.path.exists("odds_history.csv"):
+        print("  odds_history.csv non trovato: niente traiettorie.")
+        return
+    signals = pd.read_csv(csv_path, low_memory=False)
+    if "SignalKey" in signals.columns:
+        signals = signals.drop_duplicates(subset="SignalKey", keep="first")
+    signals = signals[signals["Outcome"].isin(["WIN", "LOSS"])].copy()
+    # Un solo market: OVER 1.5 HT sta intorno a 2.40 e OVER 0.5 HT a 1.50,
+    # mediarli in una riga sola da' un numero che non significa niente. Qui
+    # interessa il market che viene pubblicato.
+    signals = signals[signals["Market"] == "OVER 0.5 HT"]
+    signals["FixtureId"] = pd.to_numeric(signals["FixtureId"], errors="coerce")
+    signals["t0"] = pd.to_datetime(signals["OpenTimeUTC"], errors="coerce", utc=True)
+    signals["t1"] = pd.to_datetime(signals["SettledTimeUTC"], errors="coerce", utc=True)
+    signals = signals.dropna(subset=["FixtureId", "t0", "t1"])
+    signals["win"] = (signals["Outcome"] == "WIN").astype(int)
+
+    odds = pd.read_csv("odds_history.csv")
+    odds["FixtureId"] = pd.to_numeric(odds["FixtureId"], errors="coerce")
+    odds["Odd"] = pd.to_numeric(odds["Odd"], errors="coerce")
+    odds["t"] = pd.to_datetime(odds["ObservedAtUTC"], errors="coerce", utc=True)
+    odds = odds.dropna(subset=["FixtureId", "Odd", "t"])
+
+    # Una riga per (segnale, osservazione), tenendo solo le letture dentro la
+    # finestra in cui il segnale era pendente: una quota di prima o di dopo non
+    # e' un prezzo che avresti potuto prendere.
+    merged = signals.merge(odds, on=["FixtureId", "Market"], suffixes=("", "_odd"))
+    merged = merged[(merged["t"] >= merged["t0"]) & (merged["t"] <= merged["t1"])]
+    merged["attesa"] = (merged["t"] - merged["t0"]).dt.total_seconds() / 60.0
+    if merged.empty:
+        print("  nessuna quota osservata dentro la finestra dei segnali.")
+        return
+
+    per_signal = merged.groupby("SignalKey")["attesa"].size()
+    print(f"  segnali con almeno una quota nella finestra: {merged['SignalKey'].nunique()}")
+    print(f"  di cui con due o piu letture a tempi diversi: {int((per_signal >= 2).sum())}")
+    print()
+    print(f"  {'entrata':<12}{'n':>5}{'WR%':>8}{'quota med':>12}{'ROI%':>9}")
+    for lo, hi, label in [(0, 1, "subito"), (2, 4, "+2-4 min"), (5, 7, "+5-7 min"),
+                          (8, 12, "+8-12 min"), (13, 20, "+13-20 min")]:
+        window = merged[merged["attesa"].between(lo, hi)]
+        # Una lettura per segnale: la prima dentro la finestra, cioe' il prezzo
+        # che avresti preso entrando in quel momento.
+        window = window.sort_values("attesa").drop_duplicates(subset="SignalKey", keep="first")
+        if len(window) < min_n:
+            print(f"  {label:<12}{len(window):>5}   (sotto il minimo di {min_n})")
+            continue
+        pl = np.where(window["win"] == 1, window["Odd"] - 1.0, -1.0)
+        print(f"  {label:<12}{len(window):>5}{100 * window['win'].mean():>8.1f}"
+              f"{window['Odd'].median():>12.2f}{100 * pl.mean():>+9.1f}")
+    print()
+    print("  i vincenti il cui gol arriva prima della finestra non compaiono nella")
+    print("  riga di quella finestra: e' il costo dell'attesa, ed e' cosi' che va")
+    print("  contato invece di stimarlo a parte.")
 
 
 def main() -> int:
@@ -180,6 +251,9 @@ def main() -> int:
         need = sample_needed(edge)
         state = "raggiunto" if len(priced) >= need else f"mancano {need - len(priced)}"
         print(f"  per rilevare un margine del {100 * edge:.0f}%: ~{need} prezzate  ({state})")
+
+    block("5. Aspettare conviene? (per singolo segnale)")
+    trajectories(args.csv, args.min_n)
     return 0
 
 

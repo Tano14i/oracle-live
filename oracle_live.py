@@ -4945,6 +4945,7 @@ def radar_loop() -> None:
                 "too_early": 0,
                 "long_odds_sampled": 0,
                 "long_odds_opened": 0,
+                "odds_tracked": 0,
                 "no_model": 0,
                 "odds_skip": 0,
                 "candidate_failed": 0,
@@ -5013,20 +5014,41 @@ def radar_loop() -> None:
                         # scansione la quota si recuperava per caso; con la riapertura
                         # chiusa serve chiederla qui, altrimenti il P/L resta sulla quota
                         # di config e il bilancio si racconta bene da solo.
-                        if not pending_signal.get("open_odd"):
-                            late_odd = fetch_live_market_odd(
-                                fixture_id, headers, market,
-                                int(pending_signal.get("total_goals_at_open", 0) or 0), minute_value,
-                            )
-                            if late_odd:
+                        # La quota si chiede a OGNI scansione finche' il segnale e'
+                        # pendente, non solo finche' open_odd e' vuota. Due motivi.
+                        #
+                        # Primo: ogni lettura finisce in odds_history.csv, quindi
+                        # chiedere sempre costruisce la traiettoria del prezzo per
+                        # singolo segnale. Senza quella l'effetto dell'attesa si puo'
+                        # stimare solo con mediane su popolazioni diverse - ed e' cosi'
+                        # che l'ho stimato male la prima volta. La chiave del segnale e'
+                        # ricostruibile da FixtureId + Market, quindi non serve
+                        # cambiare lo schema del file.
+                        #
+                        # Secondo: la quota risultava registrata nel 79% degli shadow e
+                        # nel 12% dei pubblicati, cioe' al contrario di quello che serve.
+                        # Un segnale pubblicato si chiude in fretta (mediana 15.6 minuti
+                        # al gol) e con una sola occasione la mancava quasi sempre; uno
+                        # shadow resta pendente fino all'intervallo e ne ha decine.
+                        #
+                        # Il costo e' contenuto: fetch_live_market_odd tiene una cache di
+                        # 60 secondi per partita e market, quindi le scansioni dentro quel
+                        # minuto non generano chiamate.
+                        live_now = fetch_live_market_odd(
+                            fixture_id, headers, market,
+                            int(pending_signal.get("total_goals_at_open", 0) or 0), minute_value,
+                        )
+                        if live_now:
+                            scan_debug["odds_tracked"] = scan_debug.get("odds_tracked", 0) + 1
+                            if not pending_signal.get("open_odd"):
                                 with state_lock:
                                     entry = stats["monitor_risultati"].get(signal_key)
                                     if isinstance(entry, dict) and not entry.get("open_odd"):
-                                        entry["open_odd"] = late_odd
-                                update_live_training_odd(signal_key, late_odd)
+                                        entry["open_odd"] = live_now
+                                update_live_training_odd(signal_key, live_now)
                                 log_event(
                                     "LIVE_ODDS_LATE",
-                                    f"fixture_id={fixture_id} market={market} minute={minute_value} odd={late_odd}",
+                                    f"fixture_id={fixture_id} market={market} minute={minute_value} odd={live_now}",
                                 )
                         if market == MARKET_NEXT_GOAL:
                             start_total_goals = int(pending_signal.get("total_goals_at_open", 0) or 0)
@@ -5472,6 +5494,7 @@ def radar_loop() -> None:
                 f"market_window={scan_debug['market_window']} "
                 f"too_early={scan_debug['too_early']} "
                 f"long_odds={scan_debug['long_odds_opened']}/{scan_debug['long_odds_sampled']} "
+                f"odds_tracked={scan_debug['odds_tracked']} "
                 f"no_model={scan_debug['no_model']} "
                 f"candidate_failed={scan_debug['candidate_failed']} "
                 f"odds_skip={scan_debug.get('odds_skip', 0)} "
