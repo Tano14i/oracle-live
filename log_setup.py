@@ -34,24 +34,43 @@ LOG_BACKUP_COUNT = 4
 # accorgersi che qualcosa gira a vuoto.
 REPEAT_NOTICE_EVERY = 50
 
+# E anche: ogni quanti secondi, a prescindere dal conteggio.
+#
+# Serve perche' il solo conteggio ha prodotto buchi da 35 minuti. Quando il bot
+# e' inattivo ogni scansione scrive un RADAR_SUMMARY byte per byte identico, e
+# una riga ogni 50 scansioni da 50 secondi vuol dire piu' di mezz'ora di
+# silenzio. Cosi' il log muto tornava ad avere due significati - ripetizioni
+# soppresse oppure processo morto - che e' esattamente l'ambiguita' che la
+# soppressione doveva togliere.
+REPEAT_NOTICE_SECONDS = 300
+
 LOG_FORMAT = "%(asctime)sZ | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class RepeatSuppressor(logging.Filter):
-    """Lascia passare la prima riga di una serie identica, poi una ogni N.
+    """Prima riga di una serie identica, poi una ogni N ripetizioni O ogni T secondi.
 
     Non e' un filtro generico sul volume: sopprime solo ripetizioni
     CONSECUTIVE dello stesso messaggio. Messaggi diversi passano sempre, anche
     a raffica, perche' sono informazione.
+
+    Il rilascio a tempo e' il battito: senza di esso il solo conteggio ha
+    prodotto buchi da 35 minuti con il bot inattivo, e un log muto tornava ad
+    avere due significati.
     """
 
-    def __init__(self, notice_every: int = REPEAT_NOTICE_EVERY) -> None:
+    def __init__(self, notice_every: int = REPEAT_NOTICE_EVERY,
+                 notice_seconds: float = REPEAT_NOTICE_SECONDS,
+                 clock=time.monotonic) -> None:
         super().__init__()
         self._notice_every = max(2, int(notice_every))
+        self._notice_seconds = max(1.0, float(notice_seconds))
+        self._clock = clock
         self._lock = threading.Lock()
         self._last = None
         self._repeats = 0
+        self._last_emitted = clock()
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -64,6 +83,7 @@ class RepeatSuppressor(logging.Filter):
                 soppresse = self._repeats
                 self._last = message
                 self._repeats = 0
+                self._last_emitted = self._clock()
                 if soppresse >= self._notice_every:
                     # La serie precedente si e' chiusa: si dice quante righe
                     # sono state soppresse, altrimenti il buco e' invisibile.
@@ -73,9 +93,14 @@ class RepeatSuppressor(logging.Filter):
                 return True
 
             self._repeats += 1
-            if self._repeats % self._notice_every == 0:
-                record.msg = f"{message} | ripetizione {self._repeats}, righe identiche soppresse"
+            scaduto = (self._clock() - self._last_emitted) >= self._notice_seconds
+            if self._repeats % self._notice_every == 0 or scaduto:
+                # Il battito: si lascia passare una riga anche solo perche' e'
+                # passato troppo tempo, cosi' un log muto significa una cosa sola.
+                record.msg = (f"{message} | ripetizione {self._repeats},"
+                              " righe identiche soppresse")
                 record.args = ()
+                self._last_emitted = self._clock()
                 return True
             return False
 
@@ -90,7 +115,8 @@ def build_formatter() -> logging.Formatter:
 def build_file_handler(path: str,
                        max_bytes: int = LOG_MAX_BYTES,
                        backup_count: int = LOG_BACKUP_COUNT,
-                       notice_every: int = REPEAT_NOTICE_EVERY) -> RotatingFileHandler:
+                       notice_every: int = REPEAT_NOTICE_EVERY,
+                       notice_seconds: float = REPEAT_NOTICE_SECONDS) -> RotatingFileHandler:
     """Handler su file: ruota, scrive in UTC, sopprime le ripetizioni."""
     handler = RotatingFileHandler(
         path,
@@ -100,5 +126,5 @@ def build_file_handler(path: str,
         delay=False,
     )
     handler.setFormatter(build_formatter())
-    handler.addFilter(RepeatSuppressor(notice_every))
+    handler.addFilter(RepeatSuppressor(notice_every, notice_seconds))
     return handler

@@ -2668,7 +2668,13 @@ def compute_daily_snapshot(date_key: str = "") -> dict:
     if df.empty:
         return snapshot
     df["SignalKey"] = df["SignalKey"].astype(str)
-    df = df.drop_duplicates(subset=["SignalKey"], keep="last")
+    # keep="first" come in compute_performance_snapshot: la prima riga di un
+    # segnale e' quella scritta al momento della decisione. Le copie successive
+    # - 26.748 su 30.260 righe nello storico - portano uno stato a partita
+    # avanzata sotto colonne che si chiamano "AtOpen". Oggi i conteggi non
+    # cambiano perche' l'esito e' scritto su tutte le copie, ma due rapporti
+    # che deduplicano in modo diverso prima o poi divergono senza preavviso.
+    df = df.drop_duplicates(subset=["SignalKey"], keep="first")
     df["opened"] = pd.to_datetime(df["OpenTimeUTC"], errors="coerce", utc=True)
     df = df[df["opened"].notna()]
     if df.empty:
