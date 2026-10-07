@@ -30,6 +30,7 @@ import telebot
 from telebot import types
 
 from log_setup import build_file_handler
+from second_half_observer import default_sender, observer_loop
 from config import (
     API_KEY,
     AUTO_RETRAIN_EVERY_N_SETTLED,
@@ -55,6 +56,7 @@ from config import (
     MIN_ODD_O05_HT,
     MIN_ODD_O15_HT,
     MIN_OPEN_MINUTE_O05_HT,
+    SECOND_HALF_OBSERVER,
     LONG_ODDS_SAMPLING,
     LONG_ODDS_MIN,
     LONG_ODDS_MAX,
@@ -5999,6 +6001,20 @@ if __name__ == "__main__":
     threading.Thread(target=recap_loop, daemon=True).start()
     threading.Thread(target=prematch_auto_collect_loop, daemon=True).start()
     threading.Thread(target=prematch_watch_loop, daemon=True).start()
+
+    # Osservatore del 47': solo canale admin, nessuna pubblicazione. La quota
+    # usa il market NEXT GOAL, che a 0-0 nel secondo tempo e' la stessa
+    # scommessa: un gol prima del 90' e' per definizione il prossimo gol.
+    if SECOND_HALF_OBSERVER:
+        _odds_headers = {'x-apisports-key': API_KEY}
+        threading.Thread(
+            target=observer_loop,
+            args=(default_sender(bot),
+                  lambda fid: fetch_live_market_odd(fid, _odds_headers, MARKET_NEXT_GOAL, 0, 47),
+                  lambda: shutdown_requested),
+            daemon=True,
+        ).start()
+        log_event("BOOT", "Osservatore 47 attivo (solo admin)")
 
     # Il radar torna com'era prima del riavvio. Senza questo, dopo ogni crash
     # il processo ripartiva ma nessuno guardava le partite finche' un umano non

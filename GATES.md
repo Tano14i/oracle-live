@@ -20,7 +20,7 @@ interprete non vale come evidenza.
 - [x] G2: un timestamp etichettato Z e' davvero UTC
   CHECK: .venv\Scripts\python.exe gates\check_log_utc.py
   EXPECT: log utc verification passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=b182a2a4bb0f70038d566f7c6a9e5beb4c5822eb683508a5d6523834d65d3eb4; exit=0; EXPECT=matched; output-sha256=b94381bc9b21aa8ac7c878bc303292ded360ceeb32cb13fc66acf0a518e3deb6; output-bytes=203; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=b182a2a4bb0f70038d566f7c6a9e5beb4c5822eb683508a5d6523834d65d3eb4; exit=0; EXPECT=matched; output-sha256=4c4d09e2040db82dc5acd4ec5d8b14965b229d2b7132955b360752cc65e172ee; output-bytes=203; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [x] G3: una dipendenza che fallisce in loop non riempie il disco di righe identiche
   CHECK: .venv\Scripts\python.exe gates\check_log_dedup.py
@@ -30,22 +30,22 @@ interprete non vale come evidenza.
 - [x] G4: la raccolta quote a ogni scansione ha funzionato in produzione, misurata sul log reale
   CHECK: .venv\Scripts\python.exe gates\check_odds_tracking.py
   EXPECT: odds tracking verification passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=88faf9f5725553e3c85d9b803ab449d4587f464c56e5b35d2e1dde857b22be41; exit=0; EXPECT=matched; output-sha256=ea14593b061e349811cf9e0b3bc4641267a4232bfde2ff9a629a0c390ff3f043; output-bytes=118; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=88faf9f5725553e3c85d9b803ab449d4587f464c56e5b35d2e1dde857b22be41; exit=0; EXPECT=matched; output-sha256=909691747a80256bd04533f26a7b9ae0de1a6a74ba767d0aadad30e950cefebe; output-bytes=118; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [x] G5: la suite di test resta verde
   CHECK: .venv\Scripts\python.exe -m pytest -q tests
   EXPECT: /\b\d+ passed\b/
-  EVIDENCE: automatic-evidence=v1; definition-sha256=db968df039adacda4a117159f4c91862a1c43a4dd3cc5944233e9398a43623b0; exit=0; EXPECT=matched; output-sha256=38260456e1d1e4e1cb63d2645fc7c9e4abb64c0f758843ba215d80b372ae112e; output-bytes=101; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=db968df039adacda4a117159f4c91862a1c43a4dd3cc5944233e9398a43623b0; exit=0; EXPECT=matched; output-sha256=67f3dedd22fa937696c791b78a2cbed6221bf7971199a31e3dfe4556e83884cd; output-bytes=101; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
-- [x] G6: nessun segreto e nessun dato personale risulta tracciato, e l'albero non ha derive impreviste
+- [ ] G6: nessun segreto e nessun dato personale risulta tracciato, e l'albero non ha derive impreviste
   CHECK: .venv\Scripts\python.exe gates\check_repo_hygiene.py
   EXPECT: repo hygiene verification passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=634ef5689ae18ae28b507b98a864dcecf357bd47a6ccb428efab496faa9e7c58; exit=0; EXPECT=matched; output-sha256=5d7266b27b43d25418af75676486f7c6a285a826332b4a58ceb6a2923001abd7; output-bytes=131; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: pending
 
 - [x] G11: il processo IN ESECUZIONE scrive l'ora vera, non solo il modulo
   CHECK: .venv\Scripts\python.exe gates\check_log_utc_live.py
   EXPECT: log utc live verification passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=8ca32794763ed1d4929c30c1d6a2b45317cce1016b7a62802d76f1bd9a467fd9; exit=0; EXPECT=matched; output-sha256=dc478428a7f43896be466164b56a88cdce6bf3d6e0f41e7ddfa2440c8532c39a; output-bytes=210; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=8ca32794763ed1d4929c30c1d6a2b45317cce1016b7a62802d76f1bd9a467fd9; exit=0; EXPECT=matched; output-sha256=ec9c4acdccb35930b4014a47269cee765ea63e4c0126384a786deaefe9bc40a6; output-bytes=210; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [x] G12: ogni affermazione sul P/L passa da un solo strumento, che non produce mai un totale mescolato
   CHECK: .venv\Scripts\python.exe gates\check_pl_report.py
@@ -60,12 +60,32 @@ interprete non vale come evidenza.
 - [x] G14: il recap deduplica come tutto il resto (keep=first), non con l'ultima riga
   CHECK: .venv\Scripts\python.exe gates\check_recap_dedup.py
   EXPECT: recap dedup verification passed
-  EVIDENCE: automatic-evidence=v1; definition-sha256=743fa8d55206d67071699c581c910bde4b114a6765d43a5d5fda5ded7d29c887; exit=0; EXPECT=matched; output-sha256=dffe1749ead7910d0a855dd885c589a2cadac3c543bf000440439da7bcaedd09; output-bytes=106; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+  EVIDENCE: automatic-evidence=v1; definition-sha256=743fa8d55206d67071699c581c910bde4b114a6765d43a5d5fda5ded7d29c887; exit=0; EXPECT=matched; output-sha256=4b2c282c1d29f1e2f7ae533602cf4caa06705f81287f3c937e13c51cd80c9919; output-bytes=106; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [x] G15: il log non tace a lungo mentre il processo lavora (battito a tempo)
   CHECK: .venv\Scripts\python.exe gates\check_log_heartbeat.py
   EXPECT: log heartbeat verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=4c843e4f0e0bf90fe61b282a6e156af224d198ca91050b5138ffb1e029e3a959; exit=0; EXPECT=matched; output-sha256=29e6deac39f526927f6b7cef04199f58e6ee5aaaca065777358490dc668cdc1d; output-bytes=123; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G16: il segnale del 47 si apre solo nella finestra 46-48 e solo a 0-0
+  CHECK: .venv\Scripts\python.exe gates\check_second_half_window.py
+  EXPECT: second half window verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=29b8adac7160a5f74256d7bc18fcb4b3df651531ad614c487dad7ecb894dcf02; exit=0; EXPECT=matched; output-sha256=c56aebff3178b0c574cf17e7032b4533178d4ddfd485d53be68e70750f96fa6e; output-bytes=116; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G17: il blocco statistiche mostra i sette campi chiesti e dichiara quelli che l API non fornisce
+  CHECK: .venv\Scripts\python.exe gates\check_stats_block.py
+  EXPECT: stats block verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=3d79918582724ea4f92535fb84c7a7473c04a646e5459b378eff34e9aa726869; exit=0; EXPECT=matched; output-sha256=91ed68d498242dfae6134ddb5d3fc93b49f5ea15b3489ecea73efb128649188f; output-bytes=177; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G18: la cattura conserva ogni campo che l API manda, non solo quelli previsti
+  CHECK: .venv\Scripts\python.exe gates\check_stats_capture.py
+  EXPECT: stats capture verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=1223acfaec80dd5630e8e9cbafb58828f6a49349b7dcf2bb6ef3749ba10e1d79; exit=0; EXPECT=matched; output-sha256=ed6a97a1749b43d4dffd387941f78c693921c90332103c0ffe465de1625e8a78; output-bytes=117; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G19: il segnale del 47 non raggiunge free/VIP e dichiara la quota contro il pareggio misurato
+  CHECK: .venv\Scripts\python.exe gates\check_second_half_channels.py
+  EXPECT: second half channels verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=017a8a82ac76ecec7a56dff49d4f122bc5cfee75ed1741766a8e97d41123a79e; exit=0; EXPECT=matched; output-sha256=f3e2d0272fa0ce59526e66a1b8500330f4c06837c7cef5c7223102bd514a336d; output-bytes=185; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending

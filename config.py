@@ -89,6 +89,12 @@ MIN_ODD_NEXT_GOAL = float(get_setting("MIN_ODD_NEXT_GOAL", "1.60") or "1.60")
 # non cambia (quota mediana meno breakeven: -0.09 al minuto 1-2, -0.08 al 9-12),
 # quindi non si perde niente e si guadagna un prezzo su cui decidere.
 MIN_OPEN_MINUTE_O05_HT = int(get_setting("MIN_OPEN_MINUTE_O05_HT", "9") or "9")
+
+# Osservatore del 47': manda il segnale con le statistiche al solo canale
+# admin e registra snapshot ed esito in second_half_log.csv. Non pubblica su
+# free/VIP: il tasso base misurato e' 74,2% (pareggio 1,348) contro quote
+# offerte di 1,08-1,15, cioe' una perdita del 18% per scommessa.
+SECOND_HALF_OBSERVER = get_setting("SECOND_HALF_OBSERVER", "1").lower() in {"1", "true", "yes"}
 # Campionamento deliberato delle quote lunghe.
 #
 # Le regole di ritmo selezionano partite da gol, quindi il bot non vede mai la
