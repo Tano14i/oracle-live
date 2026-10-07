@@ -76,3 +76,7 @@ oracle_brain_v2_tiers.txt
 # Confronto quote personale: contiene cosa hai giocato e a che prezzo.
 # Non ha niente a che fare con il codice e non va su un repo pubblico.
 book_comparison.csv
+
+# I file ruotati del log: oracle_live.log era ignorato per nome esatto, i
+# backup .1 .2 ... no, e il primo e comparso come deriva nel repo.
+oracle_live.log.*
