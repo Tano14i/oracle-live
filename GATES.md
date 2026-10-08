@@ -37,10 +37,10 @@ interprete non vale come evidenza.
   EXPECT: /\b\d+ passed\b/
   EVIDENCE: automatic-evidence=v1; definition-sha256=db968df039adacda4a117159f4c91862a1c43a4dd3cc5944233e9398a43623b0; exit=0; EXPECT=matched; output-sha256=67f3dedd22fa937696c791b78a2cbed6221bf7971199a31e3dfe4556e83884cd; output-bytes=101; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
-- [ ] G6: nessun segreto e nessun dato personale risulta tracciato, e l'albero non ha derive impreviste
+- [x] G6: nessun segreto e nessun dato personale risulta tracciato, e l'albero non ha derive impreviste
   CHECK: .venv\Scripts\python.exe gates\check_repo_hygiene.py
   EXPECT: repo hygiene verification passed
-  EVIDENCE: pending
+  EVIDENCE: automatic-evidence=v1; definition-sha256=634ef5689ae18ae28b507b98a864dcecf357bd47a6ccb428efab496faa9e7c58; exit=0; EXPECT=matched; output-sha256=5d7266b27b43d25418af75676486f7c6a285a826332b4a58ceb6a2923001abd7; output-bytes=131; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
 - [x] G11: il processo IN ESECUZIONE scrive l'ora vera, non solo il modulo
   CHECK: .venv\Scripts\python.exe gates\check_log_utc_live.py
