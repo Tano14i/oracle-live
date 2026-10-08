@@ -112,6 +112,11 @@ interprete non vale come evidenza.
   EXPECT: log provenance verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=68a4b51a8dd2498fa04dcc7f53ebf660ece33e10ab87312ba952bc3dbd2e1061; exit=0; EXPECT=matched; output-sha256=da8a3f9b3787337be0645788339af3d8ea51850d093b5c6cccba9e347d1fea10; output-bytes=478; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G25: il minuto del gol non dipende da una gara con l API: limite superiore subito, minuto esatto inseguito, nessun doppio esito
+  CHECK: .venv\Scripts\python.exe gates\check_goal_minute.py
+  EXPECT: goal minute verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=178274cea54b84096ff21fd7d6f9d3d80ac7f2ffbbe15fa534b9f2e5c17ba48d; exit=0; EXPECT=matched; output-sha256=1e3a5f6d2d20480eb7f07dd3af92443ef5fcdea7ce0e89e4e87c6ffc22a69395; output-bytes=209; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 

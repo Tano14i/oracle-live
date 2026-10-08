@@ -60,7 +60,7 @@ COLUMNS = [
     "Corners", "TotalShots", "ShotsInsidebox", "ShotsOnGoal", "ShotsOffGoal",
     "YellowCards", "RedCards", "PossessionHome", "PossessionAway",
     "LiveOdd", "MissingFields", "StatsCovered", "StatsSource", "EventsSource",
-    "Outcome", "CloseScore", "GoalMinute", "SettledTimeUTC",
+    "Outcome", "CloseScore", "GoalMinute", "DetectedMinute", "SettledTimeUTC",
 ]
 
 # Campi grezzi -> colonne del registro. Quelli assenti restano vuoti, non zero.
@@ -106,6 +106,18 @@ PENDING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # Oltre questo tempo uno snapshot non chiuso viene archiviato come ignoto,
 # altrimenti l'osservatore lo interrogherebbe a ogni giro per sempre.
 STALE_HOURS = 12
+
+# Due fasi per uno stesso snapshot. L'API aggiorna il punteggio prima di
+# pubblicare l'evento del gol: su Port FC - Persib Bandung, l'8 ottobre 2026,
+# il punteggio era 1-0 alle 13:22:30 e l'evento "66' Goal Penalty" e' comparso
+# minuti dopo. Chiudere entro 40 secondi vuol dire perdere la gara. Quindi
+# l'esito si registra subito e il minuto esatto si inseguie dopo.
+FASE_ESITO = "esito"      # si aspetta di sapere come finisce
+FASE_MINUTO = "minuto"    # esito noto, manca il minuto del gol
+# Oltre questi tentativi si rinuncia al minuto esatto e resta il limite
+# superiore: inseguire per sempre un evento che non arriva costa una chiamata
+# a ogni giro e non porta niente.
+MAX_TENTATIVI_MINUTO = 15
 
 _lock = threading.Lock()
 # fixture_id -> {"row": riga, "capture": statistiche, "message_id": id Telegram}
@@ -245,6 +257,11 @@ def load_pending() -> int:
             "row": voce["row"],
             "capture": voce.get("capture") or {},
             "message_id": voce.get("message_id"),
+            # La fase deve sopravvivere: senza, uno snapshot che aspettava solo
+            # il minuto del gol tornerebbe nel giro delle chiusure e scriverebbe
+            # un secondo esito per lo stesso segnale.
+            "fase": voce.get("fase") or FASE_ESITO,
+            "tentativi": int(voce.get("tentativi") or 0),
         }
         ripresi += 1
     return ripresi
@@ -454,10 +471,16 @@ def format_message(row: dict, capture: dict) -> str:
     if esito in OUTCOME_LINES:
         punteggio = row.get("CloseScore") or ""
         minuto_gol = row.get("GoalMinute")
+        minuto_visto = row.get("DetectedMinute")
         if esito == "WIN" and minuto_gol not in (None, ""):
             # Il minuto del gol e' il dato che dice se conveniva entrare al 47'
             # o aspettare: quando c'e', prende il posto della frase generica.
             riga_esito = f"✅ VINTO - gol al {int(float(minuto_gol))}'"
+        elif esito == "WIN" and minuto_visto not in (None, ""):
+            # L'evento non e' ancora pubblicato: questo e' il minuto in cui il
+            # punteggio era cambiato, cioe' un limite superiore. Detto come
+            # tale, non spacciato per il minuto del gol.
+            riga_esito = f"✅ VINTO - gol entro il {int(float(minuto_visto))}'"
         else:
             riga_esito = OUTCOME_LINES[esito]
         if punteggio:
@@ -552,17 +575,23 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
 
 
 def registra_esito(fid, voce: dict, esito: str, punteggio: str, edit, adesso,
-                   minuto_gol=None) -> None:
+                   minuto_gol=None, minuto_visto=None) -> dict:
     """Scrive la riga chiusa e poi riscrive il messaggio, in quest'ordine.
 
     Il registro non deve dipendere da Telegram: se la modifica fallisce resta
     un messaggio vecchio, se la scrittura fallisse resterebbe una misura in
     meno - e la misura e' il motivo per cui l'osservatore esiste.
+
+    `minuto_visto` e' il minuto della partita quando abbiamo visto il gol: un
+    limite superiore che non dipende da nessuna gara con l'API, perche' viene
+    dallo stesso fixture che ci ha detto il punteggio. `minuto_gol` e' quello
+    esatto, dagli eventi, quando c'e'. Torna la riga scritta.
     """
     row = dict(voce.get("row") or {})
     row["Outcome"] = esito
     row["CloseScore"] = punteggio
     row["GoalMinute"] = "" if minuto_gol is None else minuto_gol
+    row["DetectedMinute"] = "" if minuto_visto is None else minuto_visto
     row["SettledTimeUTC"] = adesso.isoformat()
     append_row(row)
     if edit is not None and voce.get("message_id"):
@@ -570,6 +599,7 @@ def registra_esito(fid, voce: dict, esito: str, punteggio: str, edit, adesso,
             edit(voce["message_id"], format_message(row, voce.get("capture") or {}))
         except Exception as exc:
             diario(f"modifica fallita su {fid}: {exc}")
+    return row
 
 
 def settle_once(headers: dict, edit=None) -> int:
@@ -585,10 +615,15 @@ def settle_once(headers: dict, edit=None) -> int:
     chiusi = 0
     for fid in list(_seen):
         voce = _seen[fid]
+        if voce.get("fase", FASE_ESITO) != FASE_ESITO:
+            # L'esito e' gia' registrato: di questo si cerca solo il minuto, e
+            # lo fa backfill_once. Chiuderlo due volte scriverebbe due esiti.
+            continue
         items, _ = call_api(FIXTURES_URL, {"id": fid}, headers)
 
         esito = None
         punteggio = ""
+        minuto_visto = None
         if items:
             fixture = items[0]
             goals = fixture.get("goals") or {}
@@ -596,6 +631,7 @@ def settle_once(headers: dict, edit=None) -> int:
             fuori = goals.get("away") or 0
             punteggio = f"{casa}-{fuori}"
             stato = fixture["fixture"]["status"].get("short", "")
+            minuto_visto = fixture["fixture"]["status"].get("elapsed")
             if casa + fuori > 0:
                 esito = "WIN"
             elif stato in {"FT", "AET", "PEN"}:
@@ -618,16 +654,74 @@ def settle_once(headers: dict, edit=None) -> int:
             eventi, _ = fetch_events(fid, headers)
             minuto_gol = first_second_half_goal(eventi)
 
-        registra_esito(fid, _seen.pop(fid), esito, punteggio, edit, adesso, minuto_gol)
+        row = registra_esito(fid, voce, esito, punteggio, edit, adesso,
+                             minuto_gol, minuto_visto if esito == "WIN" else None)
+        if esito == "WIN" and minuto_gol is None:
+            # L'evento non c'era ancora. L'esito e' registrato e il messaggio
+            # aggiornato; lo snapshot resta in coda solo per il minuto esatto.
+            voce["fase"] = FASE_MINUTO
+            voce["tentativi"] = 0
+            voce["row"] = row
+        else:
+            _seen.pop(fid, None)
         chiusi += 1
     if chiusi:
         save_pending()
     return chiusi
 
 
+def backfill_once(headers: dict, edit=None) -> int:
+    """Insegue il minuto esatto del gol sugli esiti gia' registrati.
+
+    Perche' esiste: l'API aggiorna il punteggio prima di pubblicare l'evento.
+    Su Port FC - Persib Bandung il punteggio era 1-0 alle 13:22:30 e l'evento
+    "66' Goal Penalty" e' comparso minuti dopo. Chiedere una volta al momento
+    della chiusura vuol dire perdere la gara quasi sempre.
+
+    Quando il minuto arriva, scrive una riga nuova con quel minuto e riscrive
+    il messaggio con il dato esatto. Dopo MAX_TENTATIVI_MINUTO si rinuncia, e
+    resta il limite superiore gia' registrato in DetectedMinute.
+    """
+    from datetime import datetime, timezone
+    completati = 0
+    for fid in list(_seen):
+        voce = _seen[fid]
+        if voce.get("fase") != FASE_MINUTO:
+            continue
+        voce["tentativi"] = int(voce.get("tentativi") or 0) + 1
+        eventi, _ = fetch_events(fid, headers)
+        minuto = first_second_half_goal(eventi)
+        if minuto is None:
+            if voce["tentativi"] >= MAX_TENTATIVI_MINUTO:
+                diario(f"minuto del gol non trovato su {fid} dopo "
+                       f"{voce['tentativi']} tentativi, resta il limite superiore")
+                _seen.pop(fid, None)
+                completati += 1
+            continue
+        row = dict(voce.get("row") or {})
+        row["GoalMinute"] = minuto
+        row["SettledTimeUTC"] = datetime.now(timezone.utc).isoformat()
+        append_row(row)
+        if edit is not None and voce.get("message_id"):
+            try:
+                edit(voce["message_id"], format_message(row, voce.get("capture") or {}))
+            except Exception as exc:
+                diario(f"modifica fallita su {fid}: {exc}")
+        diario(f"minuto del gol trovato su {fid}: {minuto}' "
+               f"al tentativo {voce['tentativi']}")
+        _seen.pop(fid, None)
+        completati += 1
+    if completati:
+        save_pending()
+    return completati
+
+
 def observer_loop(send, fetch_odd=None, stop=None, edit=None) -> None:
-    """Il ciclo. `send` manda il messaggio e torna il suo id, `edit` lo
-    riscrive a esito noto, `stop()` dice quando smettere."""
+    """Il ciclo: apre, chiude, e insegue il minuto del gol.
+
+    `send` manda il messaggio e torna il suo id, `edit` lo riscrive quando si
+    sa di piu', `stop()` dice quando smettere.
+    """
     headers = {"x-apisports-key": API_KEY}
     ensure_log()
     ripresi = load_pending()
@@ -637,6 +731,7 @@ def observer_loop(send, fetch_odd=None, stop=None, edit=None) -> None:
         try:
             observe_once(headers, send, fetch_odd)
             settle_once(headers, edit)
+            backfill_once(headers, edit)
         except Exception as exc:
             diario(f"giro fallito: {exc}")
         time.sleep(SCAN_SECONDS)

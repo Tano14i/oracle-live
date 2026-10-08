@@ -285,8 +285,16 @@ def verifica(config) -> int:
         check(cronologia == ["registra", "modifica:9001"],
               f"esito {atteso}: la riga va registrata e poi il messaggio modificato "
               f"con l'id dell'apertura, invece la sequenza e' {cronologia}")
-        check(777 not in obs._seen,
-              "lo snapshot chiuso resta in attesa: verrebbe chiuso due volte")
+        # Un vinto senza il minuto del gol resta in coda, ma SOLO per il
+        # minuto: quello che non deve succedere e' un secondo esito.
+        residuo = obs._seen.get(777)
+        check(residuo is None or residuo.get("fase") == obs.FASE_MINUTO,
+              f"lo snapshot chiuso resta in attesa di esito: verrebbe chiuso "
+              f"due volte (fase {residuo.get('fase') if residuo else None})")
+        righe.clear()
+        obs.settle_once({}, edit_che_muore)
+        check(righe == [],
+              f"un secondo giro registra un altro esito per lo stesso segnale: {righe}")
 
     # CONTROLLO NEGATIVO: senza la funzione di modifica la chiusura non si
     # rompe, registra e tace. E' il caso di un avvio senza editor.

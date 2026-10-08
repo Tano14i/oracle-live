@@ -136,10 +136,14 @@ def verifica() -> int:
           f"la modifica non usa l'id salvato prima del riavvio: {modifiche}")
     if modifiche:
         check("VINTO" in modifiche[0][1], "il messaggio modificato non dichiara l'esito")
-    check(777 not in obs._seen, "lo snapshot chiuso resta in attesa")
-    # L'attesa su disco si svuota, altrimenti il prossimo riavvio lo riapre.
-    check(json.load(open(obs.PENDING_PATH, encoding="utf-8")) == {},
-          "l'attesa su disco non viene aggiornata dopo la chiusura")
+    # Un vinto senza il minuto del gol resta in coda solo per il minuto: cio'
+    # che non deve restare e' un'attesa di esito, che il riavvio richiuderebbe.
+    residuo = obs._seen.get(777)
+    check(residuo is None or residuo.get("fase") == obs.FASE_MINUTO,
+          f"lo snapshot chiuso resta in attesa di esito: {residuo}")
+    salvata = json.load(open(obs.PENDING_PATH, encoding="utf-8"))
+    check(all(v.get("fase") == obs.FASE_MINUTO for v in salvata.values()),
+          f"l'attesa su disco conserva un'attesa di esito dopo la chiusura: {salvata}")
 
     # 3. Uno snapshot che l'API non chiude mai non resta in coda in eterno:
     #    oltre STALE_HOURS viene archiviato come ignoto, e il messaggio lo dice.
