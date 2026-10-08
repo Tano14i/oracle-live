@@ -117,6 +117,11 @@ interprete non vale come evidenza.
   EXPECT: goal minute verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=178274cea54b84096ff21fd7d6f9d3d80ac7f2ffbbe15fa534b9f2e5c17ba48d; exit=0; EXPECT=matched; output-sha256=1e3a5f6d2d20480eb7f07dd3af92443ef5fcdea7ce0e89e4e87c6ffc22a69395; output-bytes=209; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G26: le partite non giocabili - giovanili e riserve - non si aprono, e le prime squadre con nomi simili non vengono toccate
+  CHECK: .venv\Scripts\python.exe gates\check_playable.py
+  EXPECT: playable verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=53e777670b48605810b91ba72dcb93ad50e4b236510a8579a0fc28ca43457fb6; exit=0; EXPECT=matched; output-sha256=dcb84b23a7061693078b4b8d190d6bdb897046e353c3909ba789197be64b9c3b; output-bytes=180; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 

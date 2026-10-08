@@ -42,7 +42,7 @@ import api_coverage
 from config import API_KEY, CHAT_ID
 from second_half import (LINE_BREAK, MIN_QUOTA, NOTE_EMPTY_STATS, NOTE_NO_STATS,
                          capture_fields, format_stats_block, missing_fields,
-                         second_half_gate)
+                         playable, second_half_gate)
 
 FIXTURES_URL = "https://v3.football.api-sports.io/fixtures"
 STATS_URL = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -118,6 +118,10 @@ FASE_MINUTO = "minuto"    # esito noto, manca il minuto del gol
 # superiore: inseguire per sempre un evento che non arriva costa una chiamata
 # a ogni giro e non porta niente.
 MAX_TENTATIVI_MINUTO = 15
+
+# I fixture scartati perche' non giocabili: solo per non ripetere la riga di
+# log quattro volte, una per scansione, mentre la partita e' nella finestra.
+_scartati = set()
 
 _lock = threading.Lock()
 # fixture_id -> {"row": riga, "capture": statistiche, "message_id": id Telegram}
@@ -537,6 +541,19 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
             continue
 
         lega = fixture.get("league") or {}
+        squadre = fixture.get("teams") or {}
+        incontro = (f'{(squadre.get("home") or {}).get("name", "")} vs '
+                    f'{(squadre.get("away") or {}).get("name", "")}')
+        giocabile, perche = playable(lega.get("name"), incontro)
+        if not giocabile:
+            # Prima di qualunque chiamata: su una partita che non si puo'
+            # giocare, statistiche, eventi e quota sarebbero tre chiamate
+            # spese per un messaggio che non serve a nessuno.
+            if fid not in _scartati:
+                _scartati.add(fid)
+                diario(f"saltata {incontro}: {perche}")
+            continue
+
         copertura = coverage(lega.get("id"), lega.get("season")) or {}
         if api_coverage.stats_hopeless(copertura):
             # L'API dichiara di non raccoglierle: la chiamata sarebbe HTTP 200

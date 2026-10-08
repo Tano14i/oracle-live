@@ -97,6 +97,47 @@ STAT_ICONS = {
 LINE_BREAK = chr(10)
 
 
+# Competizioni che non si possono giocare: giovanili e squadre riserve. Sulla
+# piattaforma di Fabio quelle partite non esistono, quindi un segnale la' e'
+# rumore in canale e una riga inutile nel registro.
+#
+# Perche' questo filtro e' legittimo e non e' "scegliere i risultati che mi
+# piacciono": separa per GIOCABILITA', una proprieta' della competizione che
+# non dipende da come e' finita. Verificato sui ventinove segnali al momento
+# dell'introduzione: le cinque escluse non avevano quota, quindi la misura del
+# margine - gli unici segnali su cui una scommessa esisteva - non si muove di
+# un centesimo. Cambia il canale, non il conto.
+#
+# I nomi sono la parte delicata. "Juventud" (Uruguay), "Akademiya Ontustik"
+# (Kazakhstan), "Juventus", "Independiente", "Resende", "Kahta 02 Spor" sono
+# squadre di prima squadra: un filtro su "juven", "akadem" o su due cifre le
+# ucciderebbe. Per questo si cercano marcatori di eta' con i confini di parola.
+UNPLAYABLE_PATTERNS = (
+    r"\bu-?(?:1[4-9]|2[0-3])\b",      # U19, U-20, U23
+    r"\bsub-?(?:1[4-9]|2[0-3])\b",    # Sub-20, come lo scrive il Brasile
+    r"\byouth\b",
+    r"\bjuniores\b",
+    r"\bprimavera\b",
+    r"\breserves?\b",
+    r"\bres\.",                        # "Independiente Res."
+)
+_unplayable = re.compile("|".join(UNPLAYABLE_PATTERNS), re.IGNORECASE)
+
+
+def playable(league_name: str, matchup: str) -> tuple:
+    """(giocabile, motivo). Cerca i marcatori in lega E nomi delle squadre.
+
+    Servono entrambi: "Friendlies Women" non dice niente, ma "Scotland U19 W
+    vs Croatia U19 W" si'; e "Reserve League" non lo dicono i nomi delle
+    squadre ma la competizione.
+    """
+    for testo in (league_name or "", matchup or ""):
+        trovato = _unplayable.search(str(testo))
+        if trovato:
+            return False, f"giovanili o riserve ({trovato.group(0)} in '{testo}')"
+    return True, "competizione giocabile"
+
+
 def in_window(minute_value: Optional[int]) -> bool:
     """True solo nella finestra di apertura del secondo tempo."""
     if minute_value is None:
