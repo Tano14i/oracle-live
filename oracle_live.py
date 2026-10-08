@@ -30,7 +30,11 @@ import telebot
 from telebot import types
 
 from log_setup import build_file_handler
-from second_half_observer import default_sender, observer_loop
+from second_half_observer import default_editor, default_sender, observer_loop
+# Il testo di /shutdown vive nel supervisore: e' lui che decide di non
+# riavviare dopo un'uscita pulita, e il comando per riaccenderlo si costruisce
+# dai suoi percorsi invece di essere scritto a mano in un messaggio.
+from supervisor import shutdown_notice
 from config import (
     API_KEY,
     AUTO_RETRAIN_EVERY_N_SETTLED,
@@ -5529,8 +5533,14 @@ def radar_loop() -> None:
 def shutdown_cmd(message):
     if not require_admin_access(message):
         return
+    # L'avviso parte prima dello spegnimento: request_shutdown ferma il
+    # polling, e un avviso che non arriva e' peggio di nessun avviso - proprio
+    # il caso in cui serve sapere che il supervisore non riaccendera' nulla.
+    try:
+        bot.send_message(message.chat.id, shutdown_notice(bool(stats.get("radar_running"))))
+    except Exception as exc:
+        print(f"avviso di spegnimento non inviato: {redact_secrets(str(exc))}")
     request_shutdown()
-    bot.send_message(message.chat.id, "Shutdown completed. The process will now close.")
 
 @bot.message_handler(commands=["start"])
 def start_cmd(message):
@@ -6011,7 +6021,8 @@ if __name__ == "__main__":
             target=observer_loop,
             args=(default_sender(bot),
                   lambda fid: fetch_live_market_odd(fid, _odds_headers, MARKET_NEXT_GOAL, 0, 47),
-                  lambda: shutdown_requested),
+                  lambda: shutdown_requested,
+                  default_editor(bot)),
             daemon=True,
         ).start()
         log_event("BOOT", "Osservatore 47 attivo (solo admin)")

@@ -87,6 +87,31 @@ interprete non vale come evidenza.
   EXPECT: second half channels verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=017a8a82ac76ecec7a56dff49d4f122bc5cfee75ed1741766a8e97d41123a79e; exit=0; EXPECT=matched; output-sha256=f3e2d0272fa0ce59526e66a1b8500330f4c06837c7cef5c7223102bd514a336d; output-bytes=185; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G20: un riavvio non lascia un segnale del 47 per sempre in corso: l attesa sopravvive, la chiusura modifica il messaggio
+  CHECK: .venv\Scripts\python.exe gates\check_second_half_restart.py
+  EXPECT: second half restart verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=ad283b22ce415875b51d3780bd34d6488b3f5991f1e55dd9033881b65f4c9a4f; exit=0; EXPECT=matched; output-sha256=c1aca1a0bd6a5f230979bdc345635cb04c50835781eb95ff296f12ca05ee97fa; output-bytes=273; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G21: chi spegne il bot legge che si ferma anche il supervisore e come riaccenderlo
+  CHECK: .venv\Scripts\python.exe gates\check_shutdown_notice.py
+  EXPECT: shutdown notice verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=675e61427a95b7a26ecb7536721558928f171413de38478d5eb6bcdc6c98a7dc; exit=0; EXPECT=matched; output-sha256=87bb5911e443cebf0f9e92b6bbd7ad6173e99aa29122b9376c11d1dc87dcf275; output-bytes=189; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G22: una risposta vuota dell API non viene scambiata per un nostro guasto: la copertura si legge, si tiene, e l ignoto non diventa un no
+  CHECK: .venv\Scripts\python.exe gates\check_api_coverage.py
+  EXPECT: api coverage verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=3b02170dd7f2958b24420f7fca902f7455a6fe6e376ad2e864e12022673b672e; exit=0; EXPECT=matched; output-sha256=e5413d7d8a9bbca1c552eb3a3a2ecb8bcae8a94901dc6ec82d768a14fb64e10f; output-bytes=411; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G23: dove le statistiche non sono raccolte gli eventi danno cartellini e minuto del gol, senza inventare zeri
+  CHECK: .venv\Scripts\python.exe gates\check_events_fallback.py
+  EXPECT: events fallback verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=8b5b9cc9248e8addc67c4db6a976f2534af1cb11af5c591d5bd8f054e339b018; exit=0; EXPECT=matched; output-sha256=b5e6cf6f04919a3db7ec50111039e123a6310ac6bcfc7180b0523997c0de0b9b; output-bytes=193; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
+- [x] G24: il registro dice se un buco e vuoto o errore, e non si disallinea quando le colonne cambiano
+  CHECK: .venv\Scripts\python.exe gates\check_log_provenance.py
+  EXPECT: log provenance verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=68a4b51a8dd2498fa04dcc7f53ebf660ece33e10ab87312ba952bc3dbd2e1061; exit=0; EXPECT=matched; output-sha256=da8a3f9b3787337be0645788339af3d8ea51850d093b5c6cccba9e347d1fea10; output-bytes=478; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 

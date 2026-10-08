@@ -27,6 +27,48 @@ MAX_RAPID_FAILURES = 10   # crash immediati di fila prima di arrendersi
 child = None
 stopping = False
 
+# Niente letterali con backslash o con la sequenza di nuova riga: in questo
+# progetto sono passati per editor e heredoc che li hanno trasformati una volta,
+# rompendo il file in silenzio. Il capo a riga si costruisce da chr(10) e i
+# percorsi da os.path.join, che mette i separatori giusti da se'.
+LINE_BREAK = chr(10)
+
+
+def restart_command() -> str:
+    """Il comando esatto che rimette in piedi il supervisore.
+
+    Costruito dai percorsi di questo stesso file, non scritto a mano: un
+    comando copiato in una stringa invecchia appena si sposta una cartella, e
+    arriverebbe a chi lo legge nel momento peggiore, con il bot spento.
+    """
+    pythonw = os.path.join(BASE_DIR, ".venv", "Scripts", "pythonw.exe")
+    eseguibile = pythonw if os.path.exists(pythonw) else PYTHON
+    return '"' + eseguibile + '" "' + os.path.abspath(__file__) + '"'
+
+
+def shutdown_notice(radar_on: bool) -> str:
+    """Il messaggio che /shutdown manda sul canale admin.
+
+    Esiste per un fatto osservato l'8 ottobre 2026: un /shutdown arrivato un
+    secondo dopo un riavvio ha spento il bot, e con lui il supervisore, perche'
+    un'uscita con codice 0 vale come arresto voluto. Il vecchio messaggio
+    diceva solo "the process will now close", e non lasciava capire che nessuno
+    lo avrebbe riacceso.
+    """
+    righe = [
+        "Bot spento.",
+        "",
+        "Si ferma anche il supervisore: per lui un'uscita pulita vale come",
+        "arresto voluto, quindi nessuno riaccende il bot da solo.",
+        "",
+        "Per rimetterlo in piedi, dal PC:",
+        restart_command(),
+        "",
+        "Al riavvio il radar torna come lo lasci adesso: "
+        + ("acceso." if radar_on else "in pausa."),
+    ]
+    return LINE_BREAK.join(righe)
+
 
 def log(message: str) -> None:
     line = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ") + " | " + message

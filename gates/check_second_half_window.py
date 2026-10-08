@@ -49,6 +49,27 @@ def main() -> int:
         ok, _ = sh.second_half_gate(minuto, gol, stato)
         check(not ok, f"accettato un caso da rifiutare ({perche}): minuto={minuto} gol={gol} stato={stato}")
 
+    # La regola di Ten e' "0-0 ALL'INTERVALLO". Il punteggio live al 46' puo'
+    # essere in ritardo: su Petare-Atletico Avila, l'8 ottobre 2026, goals e
+    # score dicevano 0-0 e gli eventi un gol al 42'. Con l'intervallo noto
+    # comanda quello.
+    ok, motivo = sh.second_half_gate(47, 0, "2H", 0)
+    check(ok, f"0-0 all'intervallo e 0-0 adesso rifiutato: {motivo}")
+    check("intervallo" in motivo, f"il motivo non dice da dove viene il punteggio: {motivo}")
+    ok, motivo = sh.second_half_gate(47, 0, "2H", 1)
+    check(not ok, "accettata una partita che all'intervallo non era 0-0, "
+                  "con il punteggio live in ritardo a 0-0")
+    check("intervallo" in motivo, f"il rifiuto non spiega l'intervallo: {motivo}")
+    ok, _ = sh.second_half_gate(47, 1, "2H", 0)
+    check(not ok, "accettata una partita dove il gol e' gia' arrivato: la scommessa e' chiusa")
+
+    # CONTROLLO NEGATIVO sul ripiego: intervallo ignoto non deve bloccare tutto,
+    # altrimenti un fornitore che non manda score.halftime zittirebbe il market.
+    ok, motivo = sh.second_half_gate(47, 0, "2H", None)
+    check(ok, f"con l'intervallo ignoto non si apre piu' niente: {motivo}")
+    check("ignoto" in motivo,
+          f"il ripiego sul punteggio live non viene dichiarato nel motivo: {motivo}")
+
     # in_window da solo, con i bordi.
     check(not sh.in_window(sh.WINDOW_START - 1), "in_window accetta il minuto prima")
     check(not sh.in_window(sh.WINDOW_END + 1), "in_window accetta il minuto dopo")
