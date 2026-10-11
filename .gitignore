@@ -94,3 +94,8 @@ api_coverage.json
 api_coverage.json.tmp
 second_half_log.csv.bak
 segnale_47_esempio.txt
+
+# Modello del secondo tempo e tabella squadre: artefatti del training, si
+# rigenerano da Matches.csv come gli altri .pkl.
+modello_2t.pkl
+squadre_2t.json

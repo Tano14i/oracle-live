@@ -74,6 +74,24 @@ class RispostaFinta:
         return self._payload
 
 
+class ModelloFinto:
+    """Modello iniettato: le squadre di prova non stanno nello storico, quindi
+    il modello vero non le riconosce e il segnale resterebbe muto. Qui si prova
+    l'invio, non la selezione - quella ha il suo cancello (G31)."""
+
+    @staticmethod
+    def probabilita(casa, fuori):
+        return 0.95, "modello finto"
+
+    @staticmethod
+    def selezionato(p):
+        return True
+
+    @staticmethod
+    def soglia_decile_alto():
+        return 0.7915793918550821
+
+
 def coverage_finta(league_id=None, season=None):
     """Copertura iniettata. api_coverage viene reso velenoso: se un giorno
     qualcuno smette di iniettarla, il cancello fallisce invece di fare una
@@ -144,6 +162,8 @@ def main() -> int:
     # file del bot vivo: gli cancellerebbe gli snapshot aperti.
     cartella = tempfile.mkdtemp(prefix="oracle_pending_")
     obs.PENDING_PATH = str(Path(cartella) / "pending.json")
+    modello_vero = obs.modello_2t
+    obs.modello_2t = ModelloFinto
     coverage_vera = obs.api_coverage.coverage_for
     obs.api_coverage.coverage_for = vieta_rete
     try:
@@ -153,6 +173,7 @@ def main() -> int:
         obs.requests = requests_vero
         obs.PENDING_PATH = pending_vero
         obs.api_coverage.coverage_for = coverage_vera
+        obs.modello_2t = modello_vero
         obs._seen.clear()
         shutil.rmtree(cartella, ignore_errors=True)
 

@@ -233,6 +233,24 @@ class ApiContata:
         return RispostaFinta({"errors": [], "response": [self.partita]})
 
 
+class ModelloFinto:
+    """Modello iniettato: le squadre di prova non stanno nello storico, quindi
+    il modello vero non le riconosce e il segnale resterebbe muto. Qui si prova
+    l'invio, non la selezione - quella ha il suo cancello (G31)."""
+
+    @staticmethod
+    def probabilita(casa, fuori):
+        return 0.95, "modello finto"
+
+    @staticmethod
+    def selezionato(p):
+        return True
+
+    @staticmethod
+    def soglia_decile_alto():
+        return 0.7915793918550821
+
+
 def verifica_osservatore() -> None:
     import second_half as sh
     import second_half_observer as obs
@@ -248,6 +266,8 @@ def verifica_osservatore() -> None:
 
     righe, inviati = [], []
     append_vero, requests_vero, pending_vero = obs.append_row, obs.requests, obs.PENDING_PATH
+    modello_vero = obs.modello_2t
+    obs.modello_2t = ModelloFinto
     obs.append_row = lambda row: righe.append(dict(row))
     obs.PENDING_PATH = cov.COVERAGE_PATH + ".attesa"
     api = ApiContata(partita)
@@ -314,6 +334,7 @@ def verifica_osservatore() -> None:
               f"il messaggio incolpa la copertura di una lega che e' coperta:\n{inviati}")
     finally:
         obs.append_row, obs.requests, obs.PENDING_PATH = append_vero, requests_vero, pending_vero
+        obs.modello_2t = modello_vero
         obs._seen.clear()
         if os.path.exists(cov.COVERAGE_PATH + ".attesa"):
             os.remove(cov.COVERAGE_PATH + ".attesa")

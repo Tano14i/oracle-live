@@ -39,6 +39,7 @@ from typing import Optional
 import requests
 
 import api_coverage
+import modello_2t
 from config import API_KEY, CHAT_ID
 from second_half import (LINE_BREAK, MIN_QUOTA, NOTE_EMPTY_STATS, NOTE_NO_STATS,
                          capture_fields, format_stats_block, missing_fields,
@@ -60,7 +61,7 @@ COLUMNS = [
     "Corners", "TotalShots", "ShotsInsidebox", "ShotsOnGoal", "ShotsOffGoal",
     "YellowCards", "RedCards", "PossessionHome", "PossessionAway",
     "LiveOdd", "MissingFields", "StatsCovered", "StatsSource", "EventsSource",
-    "Outcome", "CloseScore", "GoalMinute", "DetectedMinute", "SettledTimeUTC",
+    "ModelP", "Outcome", "CloseScore", "GoalMinute", "DetectedMinute", "SettledTimeUTC",
 ]
 
 # Campi grezzi -> colonne del registro. Quelli assenti restano vuoti, non zero.
@@ -442,7 +443,7 @@ def stats_note(row: dict) -> Optional[str]:
 
 def build_row(fixture: dict, capture: dict, live_odd: Optional[float], now_iso: str,
               stats_coperte: bool = True, stats_source: str = "",
-              events_source: str = "") -> dict:
+              events_source: str = "", model_p=None) -> dict:
     totals = capture.get("totals", {})
     row = {
         "ObservedAtUTC": now_iso,
@@ -459,6 +460,7 @@ def build_row(fixture: dict, capture: dict, live_odd: Optional[float], now_iso: 
         "StatsCovered": stats_coperte,
         "StatsSource": stats_source,
         "EventsSource": events_source,
+        "ModelP": "" if model_p is None else round(float(model_p), 4),
     }
     for colonna, names in FIELD_COLUMNS:
         valore = total_from(totals, names)
@@ -594,17 +596,30 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
             live_odd = chiedi_quota(fetch_odd, fid, stato.get("elapsed"))
         except Exception as exc:
             diario(f"quota non letta su {fid}: {exc}")
+        # La probabilita' di gol nel secondo tempo, dal modello storico. Il
+        # segnale si registra sempre - serve alla misura - ma suona solo se sta
+        # nel decile alto. Prima apriva su ogni 0-0 senza selezione, che era
+        # giusto finche' misuravo e sbagliato dal giorno in cui la misura era
+        # finita: cinquantotto messaggi in un'ora.
+        model_p, perche_p = modello_2t.probabilita(
+            (squadre.get("home") or {}).get("name"),
+            (squadre.get("away") or {}).get("name"))
         now_iso = datetime.now(timezone.utc).isoformat()
         row = build_row(fixture, capture, live_odd, now_iso,
                         stats_coperte=stats_coperte, stats_source=stats_source,
-                        events_source=events_source)
+                        events_source=events_source, model_p=model_p)
         voce = {"row": row, "capture": capture, "message_id": None}
         _seen[fid] = voce
         append_row(row)
-        try:
-            voce["message_id"] = message_id_of(send(format_message(row, capture)))
-        except Exception:
-            pass
+        if modello_2t.selezionato(model_p):
+            try:
+                voce["message_id"] = message_id_of(send(format_message(row, capture)))
+            except Exception:
+                pass
+        elif fid not in _scartati:
+            _scartati.add(fid)
+            diario(f"muto {incontro}: p={'n/d' if model_p is None else format(model_p, '.3f')} "
+                   f"sotto la soglia {modello_2t.soglia_decile_alto():.4f} ({perche_p})")
         # Dopo l'invio, non prima: l'id del messaggio deve finire su disco,
         # altrimenti un riavvio lascia il messaggio senza nessuno che lo chiuda.
         save_pending()

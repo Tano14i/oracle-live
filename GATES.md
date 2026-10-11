@@ -142,6 +142,11 @@ interprete non vale come evidenza.
   EXPECT: performance report verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=ccba6eede8810f714f254cddb1f9487e39880e59101b950e3c32fe581d5d07b4; exit=0; EXPECT=matched; output-sha256=43d5e03c6ce2158f6e577095c6b542c7568452a8cc0d6ad517f7136de0cda089; output-bytes=333; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G31: il modello seleziona il decile alto, una squadra ignota non produce una probabilita inventata, e si registra tutto ma suona solo il selezionato
+  CHECK: .venv\Scripts\python.exe gates\check_modello_2t.py
+  EXPECT: modello 2t verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=25dbd090f9ff9798b7d9fc52076020a0f761598a4823fea8c67cdfca28cfa9c0; exit=0; EXPECT=matched; output-sha256=1dd2373c881a06fa338a5a0464820334e47092ca2a74b15c2f673e37b342736c; output-bytes=230; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 

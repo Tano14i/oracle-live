@@ -97,6 +97,24 @@ class Api:
         return Risposta({"errors": [], "response": [self.partita]})
 
 
+class ModelloFinto:
+    """Modello iniettato: le squadre di prova non stanno nello storico, quindi
+    il modello vero non le riconosce e il segnale resterebbe muto. Qui si prova
+    l'invio, non la selezione - quella ha il suo cancello (G31)."""
+
+    @staticmethod
+    def probabilita(casa, fuori):
+        return 0.95, "modello finto"
+
+    @staticmethod
+    def selezionato(p):
+        return True
+
+    @staticmethod
+    def soglia_decile_alto():
+        return 0.7915793918550821
+
+
 def partita(lega, casa, fuori):
     return {
         "fixture": {"id": 5555, "status": {"short": "2H", "elapsed": 47}},
@@ -130,7 +148,8 @@ def main() -> int:
     # 4. observe_once non apre, non registra e NON CHIAMA l'API su una partita
     #    non giocabile: tre chiamate sprecate per un messaggio che non serve.
     righe, inviati = [], []
-    veri = (obs.append_row, obs.requests, obs.PENDING_PATH)
+    veri = (obs.append_row, obs.requests, obs.PENDING_PATH, obs.modello_2t)
+    obs.modello_2t = ModelloFinto
     obs.append_row = lambda row: righe.append(dict(row))
     obs.PENDING_PATH = str(Path(__file__).resolve().parent / "_attesa_playable.json")
     coperta = lambda lid, s: {"stats": True, "events": True}  # noqa: E731
@@ -171,7 +190,7 @@ def main() -> int:
         check(len(righe) == 1, f"la partita giocabile non viene registrata: {righe}")
         check(len(inviati) == 1, f"la partita giocabile non viene inviata: {inviati}")
     finally:
-        obs.append_row, obs.requests, obs.PENDING_PATH = veri
+        obs.append_row, obs.requests, obs.PENDING_PATH, obs.modello_2t = veri
         obs._seen.clear()
         obs._scartati.clear()
         temporanea = Path(__file__).resolve().parent / "_attesa_playable.json"
