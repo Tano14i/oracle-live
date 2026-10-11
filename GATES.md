@@ -127,6 +127,11 @@ interprete non vale come evidenza.
   EXPECT: watchdog verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=6bb7df023b76d622e2dbb54b5492546fa1a50e941edc0f4c74cb017eceb6fa9c; exit=0; EXPECT=matched; output-sha256=7a0ce698c733195cfbb64fcd3a0fc4bc8bc78c5e0dbad001a5e192f9c6622ef3; output-bytes=714; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G28: la regola dei corner non si puo ritoccare dopo aver visto i dati, e si giudica solo sui segnali che non l hanno suggerita
+  CHECK: .venv\Scripts\python.exe gates\check_corner_preregistration.py
+  EXPECT: corner preregistration verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=a88afbdb0ec03f21a5b1509457e5a5e161af7fee74d8e118c6100533fe12bd08; exit=0; EXPECT=matched; output-sha256=b1ffc9ac4cc6251f75c33e177e5319228809a9d9dfce5dc5ed1b2b63211808eb; output-bytes=231; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 
