@@ -394,6 +394,28 @@ def halftime_total(fixture: dict) -> Optional[int]:
     return (casa or 0) + (fuori or 0)
 
 
+def chiedi_quota(fetch_odd, fid, minuto):
+    """La quota live, passando il minuto a chi lo accetta.
+
+    Il minuto conta: fetch_live_market_odd lo gira a record_live_odd, che
+    scrive la riga in odds_history.csv. Finche' l'osservatore passava 47 fisso,
+    ogni quota del secondo tempo finiva registrata come se fosse del 47esimo e
+    la curva dei prezzi non esisteva - 328 osservazioni, una per partita, tutte
+    allo stesso minuto.
+
+    Un fornitore che accetta un solo argomento resta valido: i cancelli ne
+    usano di finti, e non devono rompersi per questo.
+    """
+    if fetch_odd is None:
+        return None
+    try:
+        import inspect
+        quanti = len(inspect.signature(fetch_odd).parameters)
+    except (TypeError, ValueError):
+        quanti = 1
+    return fetch_odd(fid, minuto) if quanti >= 2 else fetch_odd(fid)
+
+
 def stats_covered_in(row: dict) -> bool:
     """Se le statistiche risultavano coperte per quella partita.
 
@@ -568,11 +590,10 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
         capture = merge_cards(capture, *cards_from_events(eventi))
 
         live_odd = None
-        if fetch_odd is not None:
-            try:
-                live_odd = fetch_odd(fid)
-            except Exception:
-                live_odd = None
+        try:
+            live_odd = chiedi_quota(fetch_odd, fid, stato.get("elapsed"))
+        except Exception as exc:
+            diario(f"quota non letta su {fid}: {exc}")
         now_iso = datetime.now(timezone.utc).isoformat()
         row = build_row(fixture, capture, live_odd, now_iso,
                         stats_coperte=stats_coperte, stats_source=stats_source,
@@ -619,7 +640,7 @@ def registra_esito(fid, voce: dict, esito: str, punteggio: str, edit, adesso,
     return row
 
 
-def settle_once(headers: dict, edit=None) -> int:
+def settle_once(headers: dict, edit=None, fetch_odd=None) -> int:
     """Chiude gli snapshot in attesa: WIN al primo gol, LOSS a fine partita.
 
     Alla chiusura riscrive il messaggio di apertura con l'esito, come fa il bot
@@ -655,7 +676,17 @@ def settle_once(headers: dict, edit=None) -> int:
                 esito = "LOSS"
 
         if esito is None:
-            # Ancora aperto. Se lo e' da troppo tempo - API muta, partita
+            # Ancora aperto: questo e' il momento per leggere il prezzo. Il
+            # minuto lo sappiamo dal fixture che abbiamo appena interrogato,
+            # quindi la curva del book diventa confrontabile con quella equa
+            # ricavata dai minuti dei gol. Senza questo punto non si puo'
+            # sapere se aspettare che la quota salga a 1,40 convenga.
+            if minuto_visto is not None:
+                try:
+                    chiedi_quota(fetch_odd, fid, minuto_visto)
+                except Exception as exc:
+                    diario(f"quota non letta su {fid} al {minuto_visto}': {exc}")
+            # Se e' aperto da troppo tempo - API muta, partita
             # rinviata, fixture sparito - lo si archivia come ignoto: restare
             # in coda per sempre vorrebbe dire una chiamata a ogni giro e un
             # messaggio che dice "in corso" su una partita di tre giorni fa.
@@ -747,7 +778,7 @@ def observer_loop(send, fetch_odd=None, stop=None, edit=None) -> None:
     while not (stop() if stop else False):
         try:
             observe_once(headers, send, fetch_odd)
-            settle_once(headers, edit)
+            settle_once(headers, edit, fetch_odd)
             backfill_once(headers, edit)
         except Exception as exc:
             diario(f"giro fallito: {exc}")

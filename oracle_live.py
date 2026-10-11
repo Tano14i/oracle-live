@@ -6020,7 +6020,13 @@ if __name__ == "__main__":
         threading.Thread(
             target=observer_loop,
             args=(default_sender(bot),
-                  lambda fid: fetch_live_market_odd(fid, _odds_headers, MARKET_NEXT_GOAL, 0, 47),
+                  # Il minuto arriva da fuori: fetch_live_market_odd lo gira a
+                  # record_live_odd, che scrive la riga in odds_history.csv.
+                  # Era fisso a 47, quindi ogni quota del secondo tempo veniva
+                  # registrata come se fosse del 47esimo e la curva dei prezzi
+                  # non esisteva.
+                  lambda fid, minuto=47: fetch_live_market_odd(
+                      fid, _odds_headers, MARKET_NEXT_GOAL, 0, minuto),
                   lambda: shutdown_requested,
                   default_editor(bot)),
             daemon=True,

@@ -132,6 +132,11 @@ interprete non vale come evidenza.
   EXPECT: corner preregistration verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=a88afbdb0ec03f21a5b1509457e5a5e161af7fee74d8e118c6100533fe12bd08; exit=0; EXPECT=matched; output-sha256=b1ffc9ac4cc6251f75c33e177e5319228809a9d9dfce5dc5ed1b2b63211808eb; output-bytes=231; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G29: il minuto vero arriva alla riga registrata, cosi la curva del book esiste e si puo confrontare con quella equa
+  CHECK: .venv\Scripts\python.exe gates\check_odds_curve.py
+  EXPECT: odds curve verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=72a905e7ab8f9beb2474e5f696d88be2e067f9c936dde8b1d59d08a168f7d79d; exit=0; EXPECT=matched; output-sha256=d171d7ea4e4919b938734cfa02385a9d480313a28ee59eff6fdad8bf9dcc66fc; output-bytes=201; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 
