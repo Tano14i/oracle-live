@@ -66,6 +66,7 @@ from config import (
     LONG_ODDS_MAX,
     LONG_ODDS_PER_SCAN,
     ODDS_GATE_STRICT,
+    PERFORMANCE_REPORT_BROADCAST,
     PERFORMANCE_STAKE_EXAMPLE,
     PERFORMANCE_STARTING_BANKROLL,
     REPORT_EVERY_N_SETTLED,
@@ -2930,6 +2931,35 @@ def compute_performance_snapshot() -> dict:
     except Exception:
         by_market = []
     priced_total = sum(int(item.get("priced", 0)) for item in by_market)
+
+    # Il titolo e le righe per market venivano da due conti diversi: il titolo
+    # dal contatore stats["total_profit"], le righe dal dataset con le quote
+    # vere dove ci sono. L'11 ottobre 2026 divergevano di 10.532,50 EUR CON IL
+    # SEGNO OPPOSTO - +9.071,60 nel titolo contro -1.460,90 nella somma delle
+    # sue stesse righe - e i contatori dichiaravano 2.729 segnali chiusi contro
+    # i 1.971 del dataset. Il numero del titolo era quello che finiva sul
+    # canale VIP, su quello free e nel testo pronto per i social.
+    #
+    # Un messaggio non puo' contraddire se stesso. Il titolo e' la somma delle
+    # sue righe, e quando le righe non si possono calcolare il titolo non si
+    # inventa: resta a zero e il report non si manda.
+    if by_market:
+        total_profit = sum(float(item["profit"]) for item in by_market)
+        total_wins = sum(int(item["wins"]) for item in by_market)
+        total_losses = sum(int(item["losses"]) for item in by_market)
+        settled_total = total_wins + total_losses
+        win_rate = (total_wins / settled_total * 100) if settled_total else 0.0
+        roi = (total_profit / (settled_total * tracked_stake) * 100) if settled_total and tracked_stake else 0.0
+        units = (total_profit / tracked_stake) if tracked_stake else 0.0
+        sample_profit = units * sample_stake
+        sample_bankroll = PERFORMANCE_STARTING_BANKROLL + sample_profit
+    else:
+        total_profit = 0.0
+        roi = 0.0
+        units = 0.0
+        sample_profit = 0.0
+        sample_bankroll = float(PERFORMANCE_STARTING_BANKROLL)
+
     return {
         "priced_total": priced_total,
         "wins": total_wins,
@@ -3070,6 +3100,13 @@ def format_x_promo_message() -> str:
 
 
 def maybe_send_performance_report() -> None:
+    if not PERFORMANCE_REPORT_BROADCAST:
+        # Spento di proposito. Vedi config.PERFORMANCE_REPORT_BROADCAST: il
+        # titolo di questo report e la somma delle sue righe divergevano di
+        # 10.532,50 EUR col segno opposto, e andava anche su VIP e free.
+        # Il P/L misurato si legge con report_pl.py, che per costruzione non
+        # sa produrre un totale mescolato.
+        return
     settled_total = sum(int(stats.get(tier, {}).get("v", 0)) + int(stats.get(tier, {}).get("p", 0)) for tier in [TIER_APPROVED, TIER_CAUTION, TIER_GAMBLING])
     step = max(1, REPORT_EVERY_N_SETTLED)
     minimum = max(step, REPORT_MIN_SETTLED)

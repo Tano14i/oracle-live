@@ -123,6 +123,15 @@ RECAP_HOUR_UTC = int(get_setting("RECAP_HOUR_UTC", "21") or "21")
 RECAP_MINUTE_UTC = int(get_setting("RECAP_MINUTE_UTC", "0") or "0")
 RENEWAL_REMINDER_DAYS = int(get_setting("RENEWAL_REMINDER_DAYS", "3") or "3")
 
+# Il report di performance non si manda piu' da solo, su nessun canale.
+# L'11 ottobre 2026 il suo titolo diceva +9.071,60 EUR e ROI +33,2% mentre la
+# somma delle sue stesse righe per market diceva -1.460,90 EUR e -7,4%: dieci-
+# mila e mezzo di scarto, col segno opposto. Quel numero finiva ogni N segnali
+# chiusi sul canale VIP, su quello free e nel testo pronto per i social, cioe'
+# era una dichiarazione falsa sui soldi mandata a chi paga.
+# Il titolo ora e' la somma delle sue righe (compute_performance_snapshot), ma
+# la pubblicazione automatica resta spenta finche' non la riaccendi tu.
+PERFORMANCE_REPORT_BROADCAST = get_setting("PERFORMANCE_REPORT_BROADCAST", "0").lower() in {"1", "true", "yes"}
 REPORT_EVERY_N_SETTLED = int(get_setting("REPORT_EVERY_N_SETTLED", "10") or "10")
 REPORT_MIN_SETTLED = int(get_setting("REPORT_MIN_SETTLED", "20") or "20")
 PERFORMANCE_STAKE_EXAMPLE = float(get_setting("PERFORMANCE_STAKE_EXAMPLE", "100") or "100")

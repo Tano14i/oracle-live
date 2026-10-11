@@ -137,6 +137,11 @@ interprete non vale come evidenza.
   EXPECT: odds curve verification passed
   EVIDENCE: automatic-evidence=v1; definition-sha256=72a905e7ab8f9beb2474e5f696d88be2e067f9c936dde8b1d59d08a168f7d79d; exit=0; EXPECT=matched; output-sha256=d171d7ea4e4919b938734cfa02385a9d480313a28ee59eff6fdad8bf9dcc66fc; output-bytes=201; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
 
+- [x] G30: il report di performance non si pubblica da solo e il suo titolo e la somma delle sue righe, non un contatore che le contraddice
+  CHECK: .venv\Scripts\python.exe gates\check_performance_report.py
+  EXPECT: performance report verification passed
+  EVIDENCE: automatic-evidence=v1; definition-sha256=ccba6eede8810f714f254cddb1f9487e39880e59101b950e3c32fe581d5d07b4; exit=0; EXPECT=matched; output-sha256=43d5e03c6ce2158f6e577095c6b542c7568452a8cc0d6ad517f7136de0cda089; output-bytes=333; shell=C:\WINDOWS\system32\cmd.exe; cwd=C:\Users\Gebruiker\Desktop\Claude Workspace\Oracle Live; path=2073621dd5db/48 entries
+
 - [ ] G7: destino di oracle_brain.pkl deciso (56 MB su LFS, modello v1 di solo fallback)
   EVIDENCE: pending
 
