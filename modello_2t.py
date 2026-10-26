@@ -43,23 +43,50 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELLO_PATH = os.path.join(BASE_DIR, "modello_2t.pkl")
 SQUADRE_PATH = os.path.join(BASE_DIR, "squadre_2t.json")
 
-# Parole che non distinguono una squadra da un'altra: vanno togliete prima di
-# confrontare i nomi, altrimenti "FC Porto" e "Porto" sembrano due squadre.
-RUMORE = re.compile(r"\b(fc|cf|sc|ac|afc|cd|ca|club|de|the|if|bk|sk|fk|ks|as|us)\b")
-# Somiglianza minima per accettare un abbinamento incerto. Sotto questa soglia
-# si preferisce non sapere: una squadra sbagliata produce una probabilita'
-# sbagliata, che e' peggio di nessuna probabilita'.
-SOMIGLIANZA_MINIMA = 0.92
+# Parole che non distinguono una squadra da un'altra. La lista e' quella di
+# simplify_team_tokens in oracle_live: il bot abbina i nomi dell'API a quelli
+# del suo database da mesi, e la sua tecnica funziona meglio della mia prima
+# versione - teneva gli spazi e confrontava insiemi di token, mentre io
+# schiacciavo tutto in una stringa unica e perdevo "Real Madrid" vs "Madrid
+# Real". Con la mia la probabilita' si calcolava sul 37% dei segnali.
+RUMORE_TOKEN = (" fc ", " cf ", " sc ", " ac ", " afc ", " cd ", " ca ", " club ",
+                " calcio ", " futbol ", " football ", " sporting ", " sport ",
+                " association ", " team ", " the ", " if ", " bk ", " sk ", " fk ",
+                " ks ", " as ", " us ", " ii ", " b ", " de ", " do ", " da ")
+# Le tre soglie sono quelle di trova_squadra in oracle_live, scelte su 18.948
+# squadre: oltre 0,94 sul nome intero si accetta subito, altrimenti si prende
+# il migliore se arriva a 0,88 sul nome semplificato o a 0,86 su quello intero.
+# Sotto, si preferisce non sapere: una squadra sbagliata produce una
+# probabilita' sbagliata, che e' peggio di nessuna probabilita'.
+ACCETTA_SUBITO = 0.94
+SOGLIA_SEMPLIFICATO = 0.88
+SOGLIA_INTERO = 0.86
 
 _lock = threading.Lock()
 _stato = {"caricato": False, "modello": None, "feat": None, "soglie": None,
-          "squadre": {}, "indice": {}, "nomi": []}
+          "squadre": {}, "indice": {}, "semplici": {}, "token": {}, "cache": {}}
+
+
+def chiave(nome) -> str:
+    """Nome confrontabile: minuscolo, senza accenti, SPAZI CONSERVATI."""
+    testo = unicodedata.normalize("NFD", str(nome or "").lower())
+    testo = "".join(c for c in testo if unicodedata.category(c) != "Mn")
+    testo = re.sub(r"[^a-z0-9 ]", " ", testo)
+    return re.sub(r"\s+", " ", testo).strip()
+
+
+def semplifica(nome) -> str:
+    """Il nome senza le parole che non distinguono e senza i numeri d'anno."""
+    testo = f" {chiave(nome)} "
+    for token in RUMORE_TOKEN:
+        testo = testo.replace(token, " ")
+    testo = re.sub(r"\b\d{2,4}\b", " ", testo)
+    return re.sub(r"\s+", " ", testo).strip()
 
 
 def normalizza(nome) -> str:
-    testo = unicodedata.normalize("NFKD", str(nome or "")).encode("ascii", "ignore").decode()
-    testo = RUMORE.sub(" ", testo.lower())
-    return re.sub(r"[^a-z0-9]+", "", testo)
+    """Compatibilita': la vecchia forma schiacciata, usata solo come indice."""
+    return chiave(nome).replace(" ", "")
 
 
 def carica() -> bool:
@@ -80,8 +107,15 @@ def carica() -> bool:
         _stato["feat"] = pacco.get("feat")
         _stato["soglie"] = pacco.get("soglie") or {}
         _stato["squadre"] = squadre
-        _stato["indice"] = {normalizza(k): k for k in squadre}
-        _stato["nomi"] = list(_stato["indice"])
+        _stato["indice"] = {chiave(k): k for k in squadre}
+        _stato["semplici"] = {}
+        _stato["token"] = {}
+        for nome in squadre:
+            sem = semplifica(nome)
+            if sem:
+                _stato["semplici"].setdefault(sem, nome)
+                _stato["token"].setdefault(frozenset(sem.split()), nome)
+        _stato["cache"] = {}
         return _stato["modello"] is not None
 
 
@@ -106,17 +140,48 @@ def trova_squadra(nome):
     """
     if not carica():
         return None
-    chiave = normalizza(nome)
-    if not chiave:
+    k = chiave(nome)
+    if not k:
         return None
-    esatta = _stato["indice"].get(chiave)
-    if esatta:
-        return _stato["squadre"][esatta]
-    vicine = difflib.get_close_matches(chiave, _stato["nomi"], n=1,
-                                       cutoff=SOMIGLIANZA_MINIMA)
-    if not vicine:
-        return None
-    return _stato["squadre"][_stato["indice"][vicine[0]]]
+    if k in _stato["cache"]:
+        trovato = _stato["cache"][k]
+        return _stato["squadre"][trovato] if trovato else None
+
+    def esito(nome_db):
+        _stato["cache"][k] = nome_db
+        return _stato["squadre"][nome_db] if nome_db else None
+
+    # 1. nome identico
+    if k in _stato["indice"]:
+        return esito(_stato["indice"][k])
+    sem = semplifica(nome)
+    # 2. nome semplificato identico
+    if sem and sem in _stato["semplici"]:
+        return esito(_stato["semplici"][sem])
+    # 3. stesse parole in ordine diverso
+    if sem:
+        insieme = frozenset(sem.split())
+        if insieme in _stato["token"]:
+            return esito(_stato["token"][insieme])
+    # 4. somiglianza, con le tre soglie del bot
+    migliore_intero, r_intero = None, 0.0
+    migliore_sem, r_sem = None, 0.0
+    for k_db, nome_db in _stato["indice"].items():
+        r = difflib.SequenceMatcher(None, k, k_db).ratio()
+        if r > ACCETTA_SUBITO:
+            return esito(nome_db)
+        if r > r_intero:
+            migliore_intero, r_intero = nome_db, r
+    if sem:
+        for sem_db, nome_db in _stato["semplici"].items():
+            r = difflib.SequenceMatcher(None, sem, sem_db).ratio()
+            if r > r_sem:
+                migliore_sem, r_sem = nome_db, r
+    if migliore_sem and r_sem >= SOGLIA_SEMPLIFICATO:
+        return esito(migliore_sem)
+    if migliore_intero and r_intero >= SOGLIA_INTERO:
+        return esito(migliore_intero)
+    return esito(None)
 
 
 def probabilita(casa, fuori):

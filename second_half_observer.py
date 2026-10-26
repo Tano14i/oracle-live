@@ -62,6 +62,7 @@ COLUMNS = [
     "YellowCards", "RedCards", "PossessionHome", "PossessionAway",
     "LiveOdd", "MissingFields", "StatsCovered", "StatsSource", "EventsSource",
     "ModelP", "Outcome", "CloseScore", "GoalMinute", "DetectedMinute", "SettledTimeUTC",
+    "RowType",
 ]
 
 # Campi grezzi -> colonne del registro. Quelli assenti restano vuoti, non zero.
@@ -608,6 +609,7 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
         row = build_row(fixture, capture, live_odd, now_iso,
                         stats_coperte=stats_coperte, stats_source=stats_source,
                         events_source=events_source, model_p=model_p)
+        row["RowType"] = "open"
         voce = {"row": row, "capture": capture, "message_id": None}
         _seen[fid] = voce
         append_row(row)
@@ -646,6 +648,7 @@ def registra_esito(fid, voce: dict, esito: str, punteggio: str, edit, adesso,
     row["GoalMinute"] = "" if minuto_gol is None else minuto_gol
     row["DetectedMinute"] = "" if minuto_visto is None else minuto_visto
     row["SettledTimeUTC"] = adesso.isoformat()
+    row["RowType"] = "settle"
     append_row(row)
     if edit is not None and voce.get("message_id"):
         try:
@@ -764,6 +767,7 @@ def backfill_once(headers: dict, edit=None) -> int:
         row = dict(voce.get("row") or {})
         row["GoalMinute"] = minuto
         row["SettledTimeUTC"] = datetime.now(timezone.utc).isoformat()
+        row["RowType"] = "backfill"
         append_row(row)
         if edit is not None and voce.get("message_id"):
             try:
