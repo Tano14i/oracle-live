@@ -130,6 +130,21 @@ _lock = threading.Lock()
 # La cattura e l'id servono alla chiusura: il messaggio di apertura viene
 # riscritto con l'esito, e per riscriverlo serve ricostruire lo stesso testo.
 _seen = {}
+# fid del segnale attualmente inviato su Telegram e non ancora chiuso.
+# Un nuovo segnale selezionato non viene inviato finche' questo e' aperto:
+# due segnali aperti insieme confondono su quale scommettere.
+_attivo_fid = None
+# fid dei segnali selezionati ma in attesa di invio.
+_coda = []
+
+# Coda e segnale attivo vivono su disco separato dal pending, cosi' il gate
+# check_second_half_restart non deve cambiare (legge pending con .values()).
+QUEUE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "second_half_queue.json")
+# Oltre questo minuto il segnale attivo sblocca la coda anche senza gol:
+# al 75' senza rete il segnale e' quasi certamente perso, tenere la coda
+# ferma fino alla fine ufficiale costa un segnale che vale ancora qualcosa.
+MINUTO_TIMEOUT_CODA = 75
 
 
 # I messaggi di diagnostica finiscono nel log del bot: il suo logger si chiama
@@ -235,6 +250,37 @@ def save_pending() -> None:
             os.replace(temporaneo, PENDING_PATH)
         except OSError as exc:
             diario(f"attesa non salvata: {exc}")
+
+
+def save_queue() -> None:
+    """Scrive su disco la coda e il segnale attivo."""
+    try:
+        temporaneo = QUEUE_PATH + ".tmp"
+        with open(temporaneo, "w", encoding="utf-8") as handle:
+            json.dump({"coda": _coda, "attivo": _attivo_fid}, handle)
+        os.replace(temporaneo, QUEUE_PATH)
+    except OSError as exc:
+        diario(f"coda non salvata: {exc}")
+
+
+def load_queue() -> None:
+    """Ripristina coda e segnale attivo dopo un riavvio.
+
+    Chiamata dopo load_pending: usa _seen per validare i fid.
+    Un fid che non e' piu' in _seen (gia' chiuso prima del riavvio) viene
+    scartato silenziosamente.
+    """
+    global _coda, _attivo_fid
+    if not os.path.exists(QUEUE_PATH):
+        return
+    try:
+        with open(QUEUE_PATH, encoding="utf-8") as handle:
+            dati = json.load(handle)
+    except (OSError, ValueError):
+        return
+    _coda = [f for f in (dati.get("coda") or []) if f in _seen]
+    candidato = dati.get("attivo")
+    _attivo_fid = candidato if candidato in _seen else None
 
 
 def load_pending() -> int:
@@ -536,12 +582,56 @@ def format_message(row: dict, capture: dict) -> str:
     return LINE_BREAK.join(parti)
 
 
+def _invia_da_coda(send, edit, avviso: str = "") -> None:
+    """Invia il primo segnale in coda, se ce n'e' uno valido.
+
+    Salta i fixture scaduti (oltre STALE_HOURS) o gia' usciti da _seen.
+    Se la coda e' vuota azzera _attivo_fid.
+    `avviso` e' una riga di contesto preposta al messaggio (es. timeout 75').
+    """
+    global _attivo_fid
+    from datetime import datetime, timezone
+    adesso = datetime.now(timezone.utc)
+    while _coda:
+        fid = _coda.pop(0)
+        voce = _seen.get(fid)
+        if voce is None:
+            continue
+        aperto = observed_at(voce)
+        if aperto and (adesso - aperto).total_seconds() > STALE_HOURS * 3600:
+            diario(f"coda: {fid} scaduto ({STALE_HOURS}h), saltato")
+            continue
+        row = voce.get("row") or {}
+        capture = voce.get("capture") or {}
+        testo = format_message(row, capture)
+        if avviso:
+            testo = avviso + LINE_BREAK + testo
+        try:
+            voce["message_id"] = message_id_of(send(testo))
+        except Exception as exc:
+            diario(f"coda: invio fallito su {fid}: {exc}")
+        _attivo_fid = fid
+        save_pending()
+        save_queue()
+        diario(f"coda: inviato {row.get('MatchUp', fid)} "
+               f"(residuo coda: {len(_coda)})")
+        return
+    _attivo_fid = None
+    save_queue()
+
+
 def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
     """Un giro: cerca le partite nella finestra, manda e registra. Torna quante.
 
     `coverage(league_id, season)` dice cosa l'API dichiara di raccogliere per
     quella competizione; serve iniettabile per provare senza rete.
     """
+    global _attivo_fid, _coda
+    # Se _seen e' stato svuotato esternamente (test o riavvio parziale),
+    # l'attivo e la coda punterebbero a fixture spariti: meglio ripartire puliti.
+    if _attivo_fid is not None and _attivo_fid not in _seen:
+        _attivo_fid = None
+    _coda = [f for f in _coda if f in _seen]
     if coverage is None:
         def coverage(lid, season):
             return api_coverage.coverage_for(lid, season, headers=headers)
@@ -614,10 +704,18 @@ def observe_once(headers: dict, send, fetch_odd=None, coverage=None) -> int:
         _seen[fid] = voce
         append_row(row)
         if modello_2t.selezionato(model_p):
-            try:
-                voce["message_id"] = message_id_of(send(format_message(row, capture)))
-            except Exception:
-                pass
+            if _attivo_fid is None:
+                try:
+                    voce["message_id"] = message_id_of(send(format_message(row, capture)))
+                except Exception:
+                    pass
+                _attivo_fid = fid
+                save_queue()
+            else:
+                _coda.append(fid)
+                save_queue()
+                diario(f"coda: {incontro} accodato "
+                       f"(attivo: {_attivo_fid}, coda={len(_coda)})")
         elif fid not in _scartati:
             _scartati.add(fid)
             diario(f"muto {incontro}: p={'n/d' if model_p is None else format(model_p, '.3f')} "
@@ -658,7 +756,7 @@ def registra_esito(fid, voce: dict, esito: str, punteggio: str, edit, adesso,
     return row
 
 
-def settle_once(headers: dict, edit=None, fetch_odd=None) -> int:
+def settle_once(headers: dict, edit=None, fetch_odd=None, send=None) -> int:
     """Chiude gli snapshot in attesa: WIN al primo gol, LOSS a fine partita.
 
     Alla chiusura riscrive il messaggio di apertura con l'esito, come fa il bot
@@ -666,6 +764,7 @@ def settle_once(headers: dict, edit=None, fetch_odd=None) -> int:
     corso" su una partita finita ore prima. La riga del registro viene scritta
     prima della modifica, cosi' un errore di Telegram non porta via il dato.
     """
+    global _attivo_fid
     from datetime import datetime, timezone
     adesso = datetime.now(timezone.utc)
     chiusi = 0
@@ -708,6 +807,21 @@ def settle_once(headers: dict, edit=None, fetch_odd=None) -> int:
             # rinviata, fixture sparito - lo si archivia come ignoto: restare
             # in coda per sempre vorrebbe dire una chiamata a ogni giro e un
             # messaggio che dice "in corso" su una partita di tre giorni fa.
+            # Sblocca la coda al timeout: al 75' senza gol il segnale attivo
+            # blocca qualcosa che vale ancora. L'attivo resta tracciato fino
+            # alla fine, ma smette di bloccare il prossimo in coda.
+            if (send is not None and _coda
+                    and fid == _attivo_fid
+                    and minuto_visto is not None
+                    and int(minuto_visto) >= MINUTO_TIMEOUT_CODA):
+                incontro_at = (voce.get("row") or {}).get("MatchUp", str(fid))
+                avviso = (f"⏰ Segnale precedente ancora aperto al {minuto_visto}' "
+                          f"senza gol ({incontro_at})\n"
+                          f"⚠️ Statistiche al minuto di apertura — quota potrebbe "
+                          f"essere cambiata")
+                _attivo_fid = None
+                _invia_da_coda(send, edit, avviso=avviso)
+                diario(f"coda sbloccata al {minuto_visto}' su {fid} ({incontro_at})")
             aperto = observed_at(voce)
             if aperto is None or (adesso - aperto).total_seconds() <= STALE_HOURS * 3600:
                 continue
@@ -730,6 +844,13 @@ def settle_once(headers: dict, edit=None, fetch_odd=None) -> int:
             voce["row"] = row
         else:
             _seen.pop(fid, None)
+        # Quando il segnale attivo si chiude (qualunque esito), sblocca la coda.
+        if fid == _attivo_fid:
+            _attivo_fid = None
+            if send is not None:
+                _invia_da_coda(send, edit)
+            else:
+                save_queue()
         chiusi += 1
     if chiusi:
         save_pending()
@@ -792,12 +913,13 @@ def observer_loop(send, fetch_odd=None, stop=None, edit=None) -> None:
     headers = {"x-apisports-key": API_KEY}
     ensure_log()
     ripresi = load_pending()
+    load_queue()
     if ripresi:
         diario(f"{ripresi} snapshot ripresi dopo il riavvio")
     while not (stop() if stop else False):
         try:
             observe_once(headers, send, fetch_odd)
-            settle_once(headers, edit, fetch_odd)
+            settle_once(headers, edit, fetch_odd, send=send)
             backfill_once(headers, edit)
         except Exception as exc:
             diario(f"giro fallito: {exc}")
