@@ -90,6 +90,12 @@ second_half_pending.json.tmp
 second_half_queue.json
 second_half_queue.json.tmp
 
+# Tennis observer: log e stato runtime
+tennis_log.csv
+tennis_pending.json
+tennis_pending.json.tmp
+tennis_observer.log
+
 # Copertura dichiarata dall'API per lega e stagione: cache locale, si
 # rigenera chiedendo. E l'esempio del messaggio, che e' un'anteprima.
 api_coverage.json
