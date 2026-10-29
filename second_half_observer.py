@@ -582,12 +582,15 @@ def format_message(row: dict, capture: dict) -> str:
     return LINE_BREAK.join(parti)
 
 
-def _invia_da_coda(send, edit, avviso: str = "") -> None:
+def _invia_da_coda(send, edit, avviso: str = "",
+                   headers: dict = None, fetch_odd=None) -> None:
     """Invia il primo segnale in coda, se ce n'e' uno valido.
 
-    Salta i fixture scaduti (oltre STALE_HOURS) o gia' usciti da _seen.
-    Se la coda e' vuota azzera _attivo_fid.
-    `avviso` e' una riga di contesto preposta al messaggio (es. timeout 75').
+    Salta i fixture scaduti o gia' usciti da _seen.
+    Se headers e' disponibile ri-chiama l'API per avere statistiche e quota
+    aggiornate al momento reale dell'invio, non quelle del 47'. Se nel
+    frattempo e' arrivato un gol, il segnale non ha senso: e' saltato e
+    settle_once lo chiudera' come WIN nella scansione successiva.
     """
     global _attivo_fid
     from datetime import datetime, timezone
@@ -601,8 +604,61 @@ def _invia_da_coda(send, edit, avviso: str = "") -> None:
         if aperto and (adesso - aperto).total_seconds() > STALE_HOURS * 3600:
             diario(f"coda: {fid} scaduto ({STALE_HOURS}h), saltato")
             continue
+
         row = voce.get("row") or {}
         capture = voce.get("capture") or {}
+
+        # Aggiorna dati se abbiamo l'API key. Un headers vuoto e' falsy:
+        # in produzione arriva {"x-apisports-key": ...}, nei test {}.
+        if headers:
+            items, _ = call_api(FIXTURES_URL, {"id": fid}, headers)
+            if items:
+                fixture = items[0]
+                goals = fixture.get("goals") or {}
+                casa = goals.get("home") or 0
+                fuori = goals.get("away") or 0
+                stato = fixture["fixture"]["status"].get("short", "")
+                minuto_ora = fixture["fixture"]["status"].get("elapsed")
+
+                if casa + fuori > 0:
+                    # Gol gia' arrivato mentre era in coda: inutile scommettere,
+                    # settle_once la chiudera' WIN al prossimo giro.
+                    diario(f"coda: {fid} ha gia' un gol ({casa}-{fuori}), saltato")
+                    continue
+                if stato in {"FT", "AET", "PEN"}:
+                    diario(f"coda: {fid} finita {casa}-{fuori}, saltato")
+                    continue
+
+                # Ancora 0-0: recupera stat, eventi e quota aggiornate.
+                stats_coperte = row.get("StatsCovered") not in (
+                    False, "False", "false", "no", 0, "0")
+                if stats_coperte:
+                    payload, stats_source = fetch_stats(fid, headers)
+                else:
+                    payload, stats_source = [], "copertura"
+                capture_ora = capture_fields(payload)
+                eventi, events_source = fetch_events(fid, headers)
+                capture_ora = merge_cards(capture_ora, *cards_from_events(eventi))
+
+                live_odd = None
+                try:
+                    live_odd = chiedi_quota(fetch_odd, fid, minuto_ora)
+                except Exception:
+                    pass
+
+                try:
+                    model_p = float(row["ModelP"]) if row.get("ModelP") not in (None, "") else None
+                except (TypeError, ValueError):
+                    model_p = None
+
+                row = build_row(fixture, capture_ora, live_odd, adesso.isoformat(),
+                                stats_coperte=stats_coperte, stats_source=stats_source,
+                                events_source=events_source, model_p=model_p)
+                row["RowType"] = "open"
+                voce["row"] = row
+                voce["capture"] = capture_ora
+                capture = capture_ora
+
         testo = format_message(row, capture)
         if avviso:
             testo = avviso + LINE_BREAK + testo
@@ -614,7 +670,7 @@ def _invia_da_coda(send, edit, avviso: str = "") -> None:
         save_pending()
         save_queue()
         diario(f"coda: inviato {row.get('MatchUp', fid)} "
-               f"(residuo coda: {len(_coda)})")
+               f"al {row.get('Minute', '?')}' (residuo coda: {len(_coda)})")
         return
     _attivo_fid = None
     save_queue()
@@ -820,7 +876,8 @@ def settle_once(headers: dict, edit=None, fetch_odd=None, send=None) -> int:
                           f"⚠️ Statistiche al minuto di apertura — quota potrebbe "
                           f"essere cambiata")
                 _attivo_fid = None
-                _invia_da_coda(send, edit, avviso=avviso)
+                _invia_da_coda(send, edit, avviso=avviso,
+                               headers=headers, fetch_odd=fetch_odd)
                 diario(f"coda sbloccata al {minuto_visto}' su {fid} ({incontro_at})")
             aperto = observed_at(voce)
             if aperto is None or (adesso - aperto).total_seconds() <= STALE_HOURS * 3600:
@@ -848,7 +905,8 @@ def settle_once(headers: dict, edit=None, fetch_odd=None, send=None) -> int:
         if fid == _attivo_fid:
             _attivo_fid = None
             if send is not None:
-                _invia_da_coda(send, edit)
+                _invia_da_coda(send, edit,
+                               headers=headers, fetch_odd=fetch_odd)
             else:
                 save_queue()
         chiusi += 1

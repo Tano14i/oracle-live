@@ -87,6 +87,8 @@ oracle_live.log.*
 second_half_log.csv
 second_half_pending.json
 second_half_pending.json.tmp
+second_half_queue.json
+second_half_queue.json.tmp
 
 # Copertura dichiarata dall'API per lega e stagione: cache locale, si
 # rigenera chiedendo. E l'esempio del messaggio, che e' un'anteprima.
